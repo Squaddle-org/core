@@ -50,6 +50,13 @@ public data class DeviceCert(
         ),
     )
 
+    /** All fields 0..6 incl. [sig], e.g. for test vectors or putting a signed cert on the wire. */
+    internal fun toFullCbor(): CborValue {
+        val entries = (toUnsignedCbor() as CborValue.Map).entries.toMutableMap()
+        sig?.let { entries[6L] = CborValue.Bytes(it) }
+        return CborValue.Map(entries)
+    }
+
     /**
      * Verifies [sig] was produced by the user signing key [user] for exactly this cert's content,
      * under the "devcert" domain. Rejects an unknown major [v] and an over-length [label] even if

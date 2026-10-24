@@ -56,7 +56,15 @@ tasks.withType<Test>().configureEach {
     systemProperty("squaddle.testvectors", specVectorsDir.get().asFile.absolutePath)
 }
 
-// TODO(M0): register `generateTestVectors` (JVM main/test source set) writing into -PspecDir=../spec/protocol/testvectors
+tasks.register<JavaExec>("generateTestVectors") {
+    group = "verification"
+    description = "Regenerates protocol/testvectors/{identity,devicecert}.json into -PspecDir (default ../spec). Never hand-edit the output."
+    val jvmMain = kotlin.targets.getByName("jvm").compilations.getByName("main")
+    dependsOn(jvmMain.compileTaskProvider)
+    classpath = files(jvmMain.output.allOutputs, jvmMain.runtimeDependencyFiles)
+    mainClass.set("org.squaddle.core.testvectors.GenerateTestVectorsKt")
+    args(providers.gradleProperty("specDir").getOrElse("../spec"))
+}
 
 publishing {
     repositories {
