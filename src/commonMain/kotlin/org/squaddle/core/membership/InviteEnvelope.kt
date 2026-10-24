@@ -16,7 +16,12 @@ public object InviteEnvelope {
     public fun inviteKey(crypto: Crypto, inviteSecret: ByteArray): ByteArray =
         crypto.kdf(crypto.blake2b256(inviteSecret), 1, "SQDLINVK")
 
-    /** Only for invites without approval (§3.5) - for approval invites the key arrives in `approve` instead. */
+    /**
+     * Only for invites without approval (§3.5) - for approval invites the key arrives in `approve`
+     * instead. [nonce] defaults to a fresh random one (PROTOCOL.md §1: nonces random 24 bytes) -
+     * the override exists only so test-vector generation can produce reproducible envelope bytes;
+     * production callers MUST NOT pass a fixed nonce.
+     */
     public fun seal(
         crypto: Crypto,
         inviteSecret: ByteArray,
@@ -25,6 +30,7 @@ public object InviteEnvelope {
         epoch: Long,
         epochKey: ByteArray,
         roomName: String? = null,
+        nonce: ByteArray = crypto.randomBytes(NONCE_LENGTH),
     ): ByteArray {
         val plaintext = CanonicalCborCodec.encode(
             CborValue.Map(
@@ -36,7 +42,6 @@ public object InviteEnvelope {
                 },
             ),
         )
-        val nonce = crypto.randomBytes(NONCE_LENGTH)
         val ct = crypto.aeadEncrypt(inviteKey(crypto, inviteSecret), nonce, plaintext, roomId + inviteId)
         return nonce + ct
     }

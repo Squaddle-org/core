@@ -512,8 +512,9 @@ private fun inviteVectors(crypto: Crypto): JsonArray = buildJsonArray {
     val inviteId = ByteArray(16) { (it + 100).toByte() }
     val epochKey = ByteArray(32) { (it + 110).toByte() }
     val roomName = "Board Game Night"
+    val nonce = ByteArray(24) { (it + 120).toByte() } // fixed: vectors must be reproducible, never crypto.randomBytes()
 
-    val envelope = InviteEnvelope.seal(crypto, inviteSecret, roomIdBytes, inviteId, epoch = 0L, epochKey = epochKey, roomName = roomName)
+    val envelope = InviteEnvelope.seal(crypto, inviteSecret, roomIdBytes, inviteId, epoch = 0L, epochKey = epochKey, roomName = roomName, nonce = nonce)
     val opened = InviteEnvelope.open(crypto, inviteSecret, roomIdBytes, inviteId, envelope)
     check(opened != null && opened.epoch == 0L && opened.roomName == roomName) { "generator bug: invite envelope round trip failed" }
 

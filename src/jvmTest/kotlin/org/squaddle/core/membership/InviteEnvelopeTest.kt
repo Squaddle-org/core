@@ -41,6 +41,22 @@ class InviteEnvelopeTest {
     }
 
     @Test
+    fun sealWithFixedNonceIsReproducible() = runTest {
+        val crypto = crypto()
+        val secret = crypto.randomBytes(32)
+        val roomId = crypto.randomBytes(32)
+        val inviteId = crypto.randomBytes(16)
+        val epochKey = crypto.randomBytes(32)
+        val nonce = ByteArray(24) { it.toByte() }
+
+        val envelope = InviteEnvelope.seal(crypto, secret, roomId, inviteId, epoch = 0L, epochKey = epochKey, nonce = nonce)
+        assertContentEquals(nonce, envelope.copyOfRange(0, 24))
+        // same nonce + same inputs -> byte-identical envelope (test-vector reproducibility relies on this).
+        val again = InviteEnvelope.seal(crypto, secret, roomId, inviteId, epoch = 0L, epochKey = epochKey, nonce = nonce)
+        assertContentEquals(envelope, again)
+    }
+
+    @Test
     fun inviteKeyIsDeterministicAndSecretSensitive() = runTest {
         val crypto = crypto()
         val secret = crypto.randomBytes(32)
