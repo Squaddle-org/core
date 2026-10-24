@@ -9,6 +9,7 @@ import com.ionspin.kotlin.crypto.box.Box
 import com.ionspin.kotlin.crypto.box.BoxCorruptedOrTamperedDataException
 import com.ionspin.kotlin.crypto.generichash.GenericHash
 import com.ionspin.kotlin.crypto.generichash.crypto_generichash_BYTES
+import com.ionspin.kotlin.crypto.hash.Hash
 import com.ionspin.kotlin.crypto.kdf.Kdf
 import com.ionspin.kotlin.crypto.pwhash.PasswordHash
 import com.ionspin.kotlin.crypto.pwhash.crypto_pwhash_argon2id_ALG_ARGON2ID13
@@ -29,6 +30,9 @@ public class LibsodiumCrypto private constructor() : Crypto {
         val message = concat(parts)
         return GenericHash.genericHash(message.toUByteArray(), crypto_generichash_BYTES).toByteArray()
     }
+
+    override fun sha256(data: ByteArray): ByteArray =
+        Hash.sha256(data.toUByteArray()).toByteArray()
 
     override fun signSeedKeypair(seed32: ByteArray): KeyPair {
         val pair = Signature.seedKeypair(seed32.toUByteArray())

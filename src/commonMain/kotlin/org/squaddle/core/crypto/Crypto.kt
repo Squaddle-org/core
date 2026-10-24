@@ -9,6 +9,10 @@ public interface Crypto {
     public fun randomBytes(n: Int): ByteArray
     public fun blake2b256(vararg parts: ByteArray): ByteArray
 
+    /** SHA-256. Only used for the BIP39 mnemonic checksum (§2.1) - that standard mandates it, not a
+     * Squaddle-protocol primitive; every signed/hashed Squaddle structure still uses [blake2b256]. */
+    public fun sha256(data: ByteArray): ByteArray
+
     public fun signSeedKeypair(seed32: ByteArray): KeyPair
     public fun sign(secretKey: ByteArray, message: ByteArray): ByteArray
     public fun verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean

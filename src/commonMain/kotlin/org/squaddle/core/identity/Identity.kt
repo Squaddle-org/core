@@ -8,9 +8,12 @@ public class UserIdentity private constructor(
     public val entropy: ByteArray,
     public val signing: KeyPair,
     public val box: KeyPair,
+    public val backupKey: ByteArray,
 ) {
     public val userKey: ByteArray get() = signing.publicKey
     public val userBoxKey: ByteArray get() = box.publicKey
+
+    public fun toMnemonic(crypto: Crypto): List<String> = Bip39.toWords(crypto, entropy)
 
     public companion object {
         public fun create(crypto: Crypto): UserIdentity = fromEntropy(crypto, crypto.randomBytes(32))
@@ -20,13 +23,12 @@ public class UserIdentity private constructor(
             val master = crypto.blake2b256(entropy)
             val sign = crypto.signSeedKeypair(crypto.kdf(master, 1, "SQDLUSIG"))
             val box = crypto.boxSeedKeypair(crypto.kdf(master, 2, "SQDLUBOX"))
-            return UserIdentity(entropy, sign, box)
+            val backupKey = crypto.kdf(master, 3, "SQDLBKUP")
+            return UserIdentity(entropy, sign, box, backupKey)
         }
-    }
-}
 
-/** TODO(M0): BIP39 encode/decode against the official English wordlist + checksum. */
-public interface Mnemonic {
-    public fun toWords(entropy: ByteArray): List<String>
-    public fun fromWords(words: List<String>): ByteArray
+        /** @throws Bip39.InvalidMnemonicException if [words] is not a valid 24-word BIP39 mnemonic. */
+        public fun fromMnemonic(crypto: Crypto, words: List<String>): UserIdentity =
+            fromEntropy(crypto, Bip39.fromWords(crypto, words))
+    }
 }
