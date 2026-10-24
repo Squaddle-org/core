@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.android.library)
+    alias(libs.plugins.android.kotlin.multiplatform.library)
     `maven-publish`
 }
 
@@ -13,14 +13,20 @@ kotlin {
     jvmToolchain(17)
 
     jvm()
-    androidTarget { publishLibraryVariants("release") }
+    // AGP 9: KMP android target is configured via this android{} block (inside kotlin{}), not a
+    // separate androidTarget() + top-level android{} — see com.android.kotlin.multiplatform.library.
+    android {
+        namespace = "org.squaddle.core"
+        compileSdk = 36
+        minSdk = 26
+        withHostTestBuilder {}.configure {}
+    }
     // M5: js(IR) { browser() } / wasmJs { browser() } — only after verifying libsodium bindings support it
     // M6: iosArm64(); iosSimulatorArm64()
 
     sourceSets {
         commonMain.dependencies {
             implementation(libs.coroutines.core)
-            implementation(libs.serialization.cbor)
             implementation(libs.serialization.json)
             implementation(libs.libsodium)
             implementation(libs.ktor.client.core)
@@ -33,13 +39,10 @@ kotlin {
         jvmTest.dependencies {
             implementation(libs.kotest.property)
         }
+        getByName("androidHostTest").dependencies {
+            implementation(kotlin("test"))
+        }
     }
-}
-
-android {
-    namespace = "org.squaddle.core"
-    compileSdk = 36
-    defaultConfig { minSdk = 26 }
 }
 
 // Test vectors from the spec: SQUADDLE_SPEC_DIR (local checkout) wins, else the release pinned in SPEC_VERSION.

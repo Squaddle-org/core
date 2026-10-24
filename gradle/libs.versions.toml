@@ -1,19 +1,22 @@
-# Starting point only — bump everything to current stable on first build (see CLAUDE.md).
+# Bumped to current stable as of 2026-10-24 (see CLAUDE.md). libsodium-bindings stays pinned to
+# the version verified to build for jvm+android (core/CLAUDE.md "verify before enabling a target").
+# No bip39 entry: no maintained pure-Kotlin KMP BIP39 library found: commonMain implements §2.1
+# (wordlist + checksum) directly instead of adding a dependency. No serialization-cbor entry:
+# kotlinx-serialization-cbor does not produce RFC 8949 §4.2.1 deterministic output (indefinite-length
+# collections, no canonical map-key sort) - see encoding/CanonicalCbor.kt for the hand-written encoder.
 [versions]
-kotlin = "2.2.20"
-agp = "8.12.0"
-coroutines = "1.10.2"
-serialization = "1.9.0"
-ktor = "3.3.0"
-sqldelight = "2.1.0"
-libsodium-bindings = "0.9.2"
-bip39 = "1.0.6"          # verify artifact; fallback: implement BIP39 against the official wordlist
-kotest = "5.9.1"
+kotlin = "2.4.21"
+agp = "9.4.1"
+coroutines = "1.11.0"
+serialization = "1.12.0"
+ktor = "3.6.0"
+sqldelight = "2.4.1"
+libsodium-bindings = "0.9.5"
+kotest = "6.2.6"
 
 [libraries]
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
-serialization-cbor = { module = "org.jetbrains.kotlinx:kotlinx-serialization-cbor", version.ref = "serialization" }
 serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
@@ -26,6 +29,8 @@ kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest"
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-android-library = { id = "com.android.library", version.ref = "agp" }
+# AGP 9 dropped com.android.library + kotlin.multiplatform together; KMP android targets now use
+# this dedicated plugin (android{} block moves inside kotlin{}). See core/build.gradle.kts.
+android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 sqldelight = { id = "app.cash.sqldelight", version.ref = "sqldelight" }
