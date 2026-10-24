@@ -45,6 +45,21 @@ class TestVectorsVerificationTest {
     private suspend fun crypto(): Crypto = LibsodiumCrypto.create()
 
     @Test
+    fun cborRejectVectorsVerify() = runTest {
+        for (vector in vectors("cbor-reject.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val cbor = b64(obj["input"]!!.jsonObject["cbor"]!!.jsonPrimitive.content)
+            val accept = obj["expected"]!!.jsonObject["accept"]!!.jsonPrimitive.booleanOrNull!!
+            if (accept) {
+                CanonicalCborCodec.decode(cbor) // must not throw
+            } else {
+                assertFailsWith<Exception>(name) { CanonicalCborCodec.decode(cbor) }
+            }
+        }
+    }
+
+    @Test
     fun identityVectorsVerify() = runTest {
         val crypto = crypto()
         for (vector in vectors("identity.json")) {

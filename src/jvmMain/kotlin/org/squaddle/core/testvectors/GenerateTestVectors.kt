@@ -16,6 +16,7 @@ import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.crypto.LibsodiumCrypto
 import org.squaddle.core.crypto.signingInput
 import org.squaddle.core.encoding.CanonicalCborCodec
+import org.squaddle.core.encoding.CborValue
 import org.squaddle.core.identity.Bip39
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
@@ -35,6 +36,7 @@ public fun main(args: Array<String>) {
 
     runBlocking {
         val crypto = LibsodiumCrypto.create()
+        writeJson(File(outDir, "cbor-reject.json"), cborRejectVectors())
         writeJson(File(outDir, "identity.json"), identityVectors(crypto))
         writeJson(File(outDir, "devicecert.json"), deviceCertVectors(crypto))
     }
@@ -46,6 +48,56 @@ private fun writeJson(file: File, array: JsonArray) {
     val json = Json { prettyPrint = true }
     file.writeText(json.encodeToString(JsonArray.serializer(), array) + "\n")
     println("wrote ${file.path} (${array.size} vectors)")
+}
+
+// ---- cbor-reject.json : PROTOCOL.md §1 "A decoder MUST reject ..." ----
+
+private fun cborRejectVectors(): JsonArray = buildJsonArray {
+    val acceptCases = listOf(
+        "uint-0" to CborValue.UInt(0),
+        "uint-23" to CborValue.UInt(23),
+        "uint-24" to CborValue.UInt(24),
+        "uint-255" to CborValue.UInt(255),
+        "uint-256" to CborValue.UInt(256),
+        "uint-65535" to CborValue.UInt(65535),
+        "uint-65536" to CborValue.UInt(65536),
+        "uint-4294967295" to CborValue.UInt(4294967295L),
+        "uint-4294967296" to CborValue.UInt(4294967296L),
+        "bool-true" to CborValue.Bool(true),
+        "bool-false" to CborValue.Bool(false),
+        "null" to CborValue.Null,
+        "sorted-map" to CborValue.Map(linkedMapOf(0L to CborValue.UInt(2), 2L to CborValue.UInt(3), 5L to CborValue.UInt(1))),
+    )
+    for ((name, value) in acceptCases) {
+        val encoded = CanonicalCborCodec.encode(value)
+        check(CanonicalCborCodec.decode(encoded) == value) { "generator bug: cbor-reject accept case '$name' does not round-trip" }
+        addJsonObject {
+            put("name", "cbor-accept-$name")
+            putJsonObject("input") { put("cbor", encoded.b64()) }
+            putJsonObject("expected") { put("accept", true) }
+        }
+    }
+
+    val rejectCases = listOf(
+        "indefinite-length-map" to (byteArrayOf(0xbf.toByte(), 0xff.toByte()) to "indefinite-length items are not canonical"),
+        "overlong-int-encoding" to (byteArrayOf(0x18, 0x00) to "non-shortest-form integer/length encoding"),
+        "out-of-order-map-keys" to (byteArrayOf(0xa2.toByte(), 0x02, 0x00, 0x00, 0x00) to "map keys not in strictly ascending canonical order"),
+        "duplicate-map-keys" to (byteArrayOf(0xa2.toByte(), 0x00, 0x00, 0x00, 0x01) to "map keys not in strictly ascending canonical order (duplicate)"),
+        "trailing-bytes" to (CanonicalCborCodec.encode(CborValue.UInt(1)) + byteArrayOf(0x00) to "trailing bytes after top-level value"),
+        "truncated-input" to (byteArrayOf(0x19, 0x01) to "unexpected end of input"),
+    )
+    for ((name, pair) in rejectCases) {
+        val (bytes, reason) = pair
+        check(runCatching { CanonicalCborCodec.decode(bytes) }.isFailure) { "generator bug: cbor-reject case '$name' does not fail to decode" }
+        addJsonObject {
+            put("name", "cbor-reject-$name")
+            putJsonObject("input") { put("cbor", bytes.b64()) }
+            putJsonObject("expected") {
+                put("accept", false)
+                put("reason", reason)
+            }
+        }
+    }
 }
 
 // ---- identity.json : PROTOCOL.md §2.1 ----
