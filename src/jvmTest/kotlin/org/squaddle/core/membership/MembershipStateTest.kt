@@ -384,6 +384,47 @@ class MembershipStateTest {
         assertIs<RejectReason.Invalid>(room.applyAndExpectReject(entry))
     }
 
+    // ---- §3.4 / ADR-0012: rotationPending ----
+
+    @Test
+    fun removeSetsRotationPendingClearedOnlyByEpochRotate() = runTest {
+        val crypto = crypto(); val owner = actor(crypto)
+        val room = freshRoom(crypto, owner)
+        val member = actor(crypto)
+        val inviteId = crypto.randomBytes(16)
+        room.apply(room.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(inviteId)))
+        room.apply(room.build(member, EntryType.JOIN, joinBody(inviteId)))
+        assertEquals(false, room.state.rotationPending)
+
+        room.apply(room.build(owner, EntryType.REMOVE, removeBody(member.identity.userKey)))
+        assertEquals(true, room.state.rotationPending)
+
+        // Unrelated entries don't clear it while a rotation is owed.
+        room.apply(room.build(owner, EntryType.ROOM_SETTINGS, roomSettingsBody()))
+        assertEquals(true, room.state.rotationPending)
+
+        room.apply(room.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey))))
+        assertEquals(false, room.state.rotationPending)
+    }
+
+    @Test
+    fun epochRotateByAnyAdminClearsRotationPendingEvenIfNotTheRemover() = runTest {
+        val crypto = crypto(); val owner = actor(crypto)
+        val room = freshRoom(crypto, owner)
+        val admin = actor(crypto)
+        val member = actor(crypto)
+        val inviteId = crypto.randomBytes(16)
+        room.apply(room.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(inviteId)))
+        room.apply(room.build(admin, EntryType.JOIN, joinBody(inviteId)))
+        room.apply(room.build(member, EntryType.JOIN, joinBody(inviteId)))
+        room.apply(room.build(owner, EntryType.SET_ROLE, setRoleBody(admin.identity.userKey, "admin")))
+        room.apply(room.build(owner, EntryType.REMOVE, removeBody(member.identity.userKey))) // owner removes
+        assertEquals(true, room.state.rotationPending)
+        // A different admin (not the one who removed) rotates - still clears it.
+        room.apply(room.build(admin, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey, admin.identity.userKey))))
+        assertEquals(false, room.state.rotationPending)
+    }
+
     // ---- row 7: leave ----
 
     @Test

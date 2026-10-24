@@ -22,12 +22,13 @@ public class MembershipStateImpl private constructor(
     override val epoch: Long,
     private val roles: Map<String, Role>,
     private val invitesById: Map<String, Invite>,
+    override val rotationPending: Boolean,
 ) : MembershipState {
 
     public companion object {
         /** No room exists yet - the only entry `apply()` will accept from here is a genesis. */
         public fun empty(crypto: Crypto): MembershipState =
-            MembershipStateImpl(crypto, ByteArray(32), ByteArray(32), 0L, 0L, emptyMap(), emptyMap())
+            MembershipStateImpl(crypto, ByteArray(32), ByteArray(32), 0L, 0L, emptyMap(), emptyMap(), rotationPending = false)
     }
 
     override fun roleOf(user: ByteArray): Role? = roles[user.hex()]
@@ -144,7 +145,7 @@ public class MembershipStateImpl private constructor(
             Role.ADMIN -> if (targetRole != Role.MEMBER) return reject(RejectReason.Unauthorized)
             else -> return reject(RejectReason.Unauthorized)
         }
-        return next(entry, roles = roles - targetHex)
+        return next(entry, roles = roles - targetHex, rotationPending = true)
     }
 
     // ---- §3.3 row 7: leave ----
@@ -208,7 +209,7 @@ public class MembershipStateImpl private constructor(
         if (listedUsers.size != listedUsers.toSet().size) return reject(RejectReason.Invalid("epochRotate lists the same user more than once"))
         val currentNonPending = roles.filterValues { it != Role.PENDING }.keys
         if (listedUsers.toSet() != currentNonPending) return reject(RejectReason.Invalid("epochRotate must contain exactly the current non-pending members"))
-        return next(entry, epoch = newEpoch)
+        return next(entry, epoch = newEpoch, rotationPending = false)
     }
 
     // ---- §3.3 row 11: roomSettings ----
@@ -225,8 +226,9 @@ public class MembershipStateImpl private constructor(
         roles: Map<String, Role> = this.roles,
         invites: Map<String, Invite> = this.invitesById,
         epoch: Long = this.epoch,
+        rotationPending: Boolean = this.rotationPending,
     ): Result<MembershipState> = Result.success(
-        MembershipStateImpl(crypto, entry.room, entry.entryHash(crypto), entry.index + 1, epoch, roles, invites),
+        MembershipStateImpl(crypto, entry.room, entry.entryHash(crypto), entry.index + 1, epoch, roles, invites, rotationPending),
     )
 
     private fun reject(reason: RejectReason): Result<MembershipState> = Result.failure(MembershipRejectException(reason))

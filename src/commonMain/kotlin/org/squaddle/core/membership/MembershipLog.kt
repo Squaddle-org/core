@@ -128,10 +128,14 @@ public interface MembershipState {
     public val headHash: ByteArray
     public val nextIndex: Long
     public val epoch: Long
+
+    /** PROTOCOL.md §3.4 / ADR-0012: true from an accepted `remove` until the next accepted
+     * `epochRotate`. While true, content-plane ops MUST be rejected (`rotation_required`) -
+     * membership-log appends other than `epochRotate` are unaffected. */
+    public val rotationPending: Boolean
     public fun roleOf(user: ByteArray): Role?
     public fun invites(): Collection<Invite>
 
     /** Returns the new state or the reason the entry must be rejected. */
     public fun apply(stored: StoredEntry): Result<MembershipState>
 }
-// TODO(M1): implementation + exhaustive reject tests (one per row in PROTOCOL.md §3.3)
