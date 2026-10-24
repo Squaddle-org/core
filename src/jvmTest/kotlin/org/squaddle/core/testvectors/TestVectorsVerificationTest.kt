@@ -169,6 +169,7 @@ class TestVectorsVerificationTest {
                 val entry = decodeLogEntry(b64(entryObj["cbor"]!!.jsonPrimitive.content))
                 state = state.apply(StoredEntry(entry, 1_700_000_500L)).getOrThrow()
                 assertContentEquals(b64(entryObj["entryHash"]!!.jsonPrimitive.content), entry.entryHash(crypto))
+                assertEquals(entryObj["rotationPending"]!!.jsonPrimitive.booleanOrNull, state.rotationPending)
             }
             assertContentEquals(expectedRoomId, state.roomId)
         }

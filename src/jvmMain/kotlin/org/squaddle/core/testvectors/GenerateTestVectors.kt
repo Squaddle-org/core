@@ -288,6 +288,10 @@ private class Chain(val crypto: Crypto, val roomId: ByteArray) {
     var head: ByteArray? = null
     val appliedEntries = mutableListOf<LogEntry>()
 
+    /** Entry paired with the state immediately after it was applied - so a vector can record
+     * derived fields like `rotationPending` per step, not just the entry's own bytes. */
+    val appliedSteps = mutableListOf<Pair<LogEntry, MembershipState>>()
+
     fun build(actor: FixedActor, type: EntryType, body: CborValue.Map): LogEntry =
         LogEntry.sign(crypto, actor.deviceKey.secretKey, roomId, index, head, actor.identity.userKey, actor.cert, type, body, 1_700_000_000L + index)
 
@@ -296,6 +300,7 @@ private class Chain(val crypto: Crypto, val roomId: ByteArray) {
         index = entry.index + 1
         head = entry.entryHash(crypto)
         appliedEntries += entry
+        appliedSteps += entry to state
         return state
     }
 
@@ -326,12 +331,13 @@ private fun logEntryVectors(crypto: Crypto): JsonArray = buildJsonArray {
         putJsonObject("input") { put("room", rid.b64()) }
         putJsonObject("expected") {
             putJsonArray("entries") {
-                for (e in chain.appliedEntries) {
+                for ((e, stateAfter) in chain.appliedSteps) {
                     addJsonObject {
                         put("index", e.index)
                         put("type", entryTypeName(e.type))
                         put("cbor", CanonicalCborCodec.encode(e.toFullCbor()).b64())
                         put("entryHash", e.entryHash(crypto).b64())
+                        put("rotationPending", stateAfter.rotationPending)
                     }
                 }
             }
