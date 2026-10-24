@@ -18,6 +18,12 @@ import org.squaddle.core.encoding.CborValue
 import org.squaddle.core.identity.Bip39
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
+import org.squaddle.core.membership.EntryType
+import org.squaddle.core.membership.InviteEnvelope
+import org.squaddle.core.membership.LogEntry
+import org.squaddle.core.membership.MembershipState
+import org.squaddle.core.membership.MembershipStateImpl
+import org.squaddle.core.membership.StoredEntry
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -26,6 +32,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -118,16 +125,96 @@ class TestVectorsVerificationTest {
     }
 
     /** Minimal decoder for the full 0..6 field DeviceCert CBOR shape used by test-vector input. */
-    private fun decodeDeviceCert(bytes: ByteArray): DeviceCert {
+    private fun decodeDeviceCert(bytes: ByteArray): DeviceCert =
+        decodeDeviceCertFromMap((CanonicalCborCodec.decode(bytes) as CborValue.Map).entries)
+
+    private fun decodeDeviceCertFromMap(map: Map<Long, CborValue>): DeviceCert = DeviceCert(
+        v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+        user = (map.getValue(1L) as CborValue.Bytes).value,
+        userBox = (map.getValue(2L) as CborValue.Bytes).value,
+        device = (map.getValue(3L) as CborValue.Bytes).value,
+        label = (map.getValue(4L) as CborValue.Text).value,
+        issuedAt = (map.getValue(5L) as CborValue.UInt).value,
+        sig = (map[6L] as? CborValue.Bytes)?.value,
+    )
+
+    /** Minimal decoder for the full 0..9 field LogEntry CBOR shape used by test-vector input. */
+    private fun decodeLogEntry(bytes: ByteArray): LogEntry {
         val map = (CanonicalCborCodec.decode(bytes) as CborValue.Map).entries
-        return DeviceCert(
+        val certMap = (map.getValue(5L) as CborValue.Map).entries
+        val typeCode = (map.getValue(6L) as CborValue.UInt).value.toInt()
+        return LogEntry(
             v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
-            user = (map.getValue(1L) as CborValue.Bytes).value,
-            userBox = (map.getValue(2L) as CborValue.Bytes).value,
-            device = (map.getValue(3L) as CborValue.Bytes).value,
-            label = (map.getValue(4L) as CborValue.Text).value,
-            issuedAt = (map.getValue(5L) as CborValue.UInt).value,
-            sig = (map[6L] as? CborValue.Bytes)?.value,
+            room = (map.getValue(1L) as CborValue.Bytes).value,
+            index = (map.getValue(2L) as CborValue.UInt).value,
+            prev = (map[3L] as? CborValue.Bytes)?.value,
+            author = (map.getValue(4L) as CborValue.Bytes).value,
+            cert = decodeDeviceCertFromMap(certMap),
+            type = EntryType.entries.first { it.code == typeCode },
+            body = map.getValue(7L) as CborValue.Map,
+            ts = (map.getValue(8L) as CborValue.UInt).value,
+            sig = (map[9L] as? CborValue.Bytes)?.value,
         )
+    }
+
+    @Test
+    fun logEntryVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("logentry.json")) {
+            val obj = vector.jsonObject
+            val expectedRoomId = b64(obj["input"]!!.jsonObject["room"]!!.jsonPrimitive.content)
+            var state: MembershipState = MembershipStateImpl.empty(crypto)
+            for (entryJson in obj["expected"]!!.jsonObject["entries"]!!.jsonArray) {
+                val entryObj = entryJson.jsonObject
+                val entry = decodeLogEntry(b64(entryObj["cbor"]!!.jsonPrimitive.content))
+                state = state.apply(StoredEntry(entry, 1_700_000_500L)).getOrThrow()
+                assertContentEquals(b64(entryObj["entryHash"]!!.jsonPrimitive.content), entry.entryHash(crypto))
+            }
+            assertContentEquals(expectedRoomId, state.roomId)
+        }
+    }
+
+    @Test
+    fun logRejectVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("log-reject.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val input = obj["input"]!!.jsonObject
+            var state: MembershipState = MembershipStateImpl.empty(crypto)
+            for (prefixCbor in input["prefix"]!!.jsonArray) {
+                val entry = decodeLogEntry(b64(prefixCbor.jsonPrimitive.content))
+                state = state.apply(StoredEntry(entry, 1_700_000_500L)).getOrThrow()
+            }
+            val badEntry = decodeLogEntry(b64(input["entry"]!!.jsonPrimitive.content))
+            assertTrue(state.apply(StoredEntry(badEntry, 1_700_000_500L)).isFailure, name)
+        }
+    }
+
+    @Test
+    fun inviteVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("invite.json")) {
+            val obj = vector.jsonObject
+            val input = obj["input"]!!.jsonObject
+            val expected = obj["expected"]!!.jsonObject
+            val secret = b64(input["inviteSecret"]!!.jsonPrimitive.content)
+            val roomIdBytes = b64(input["roomId"]!!.jsonPrimitive.content)
+            val inviteId = b64(input["inviteId"]!!.jsonPrimitive.content)
+
+            if (expected["accept"]!!.jsonPrimitive.booleanOrNull == false) {
+                val envelope = b64(input["envelope"]!!.jsonPrimitive.content)
+                assertNull(InviteEnvelope.open(crypto, secret, roomIdBytes, inviteId, envelope))
+                continue
+            }
+
+            assertContentEquals(b64(expected["inviteKey"]!!.jsonPrimitive.content), InviteEnvelope.inviteKey(crypto, secret))
+            val envelope = b64(expected["envelope"]!!.jsonPrimitive.content)
+            val opened = InviteEnvelope.open(crypto, secret, roomIdBytes, inviteId, envelope)
+            assertContentEquals(roomIdBytes, opened?.room)
+            assertEquals(input["epoch"]!!.jsonPrimitive.long, opened?.epoch)
+            assertContentEquals(b64(input["epochKey"]!!.jsonPrimitive.content), opened?.epochKey)
+            assertEquals(input["roomName"]?.jsonPrimitive?.content, opened?.roomName)
+        }
     }
 }

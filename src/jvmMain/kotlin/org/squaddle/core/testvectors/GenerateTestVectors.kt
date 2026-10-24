@@ -20,6 +20,15 @@ import org.squaddle.core.encoding.CborValue
 import org.squaddle.core.identity.Bip39
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
+import org.squaddle.core.membership.EntryType
+import org.squaddle.core.membership.InviteEnvelope
+import org.squaddle.core.membership.LogEntry
+import org.squaddle.core.membership.MembershipRejectException
+import org.squaddle.core.membership.MembershipState
+import org.squaddle.core.membership.MembershipStateImpl
+import org.squaddle.core.membership.RejectReason
+import org.squaddle.core.membership.StoredEntry
+import org.squaddle.core.membership.roomId
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -39,6 +48,9 @@ public fun main(args: Array<String>) {
         writeJson(File(outDir, "cbor-reject.json"), cborRejectVectors())
         writeJson(File(outDir, "identity.json"), identityVectors(crypto))
         writeJson(File(outDir, "devicecert.json"), deviceCertVectors(crypto))
+        writeJson(File(outDir, "logentry.json"), logEntryVectors(crypto))
+        writeJson(File(outDir, "log-reject.json"), logRejectVectors(crypto))
+        writeJson(File(outDir, "invite.json"), inviteVectors(crypto))
     }
 }
 
@@ -213,6 +225,322 @@ private fun JsonArrayBuilder.addRejectDeviceCert(crypto: Crypto, name: String, c
         putJsonObject("expected") {
             put("accept", false)
             put("reason", reason)
+        }
+    }
+}
+
+// ---- membership (logentry.json / log-reject.json / invite.json) : PROTOCOL.md §3 ----
+
+private data class FixedActor(val identity: UserIdentity, val deviceKey: org.squaddle.core.crypto.KeyPair, val cert: DeviceCert)
+
+/** [seed]s must be spaced far enough apart (multiples of 100 here) that entropy/deviceSeed byte
+ * patterns of different actors never collide. Fixed, test-only - never crypto.randomBytes(). */
+private fun fixedActor(crypto: Crypto, seed: Int, label: String): FixedActor {
+    val entropy = ByteArray(32) { (it + seed).toByte() }
+    val deviceSeed = ByteArray(32) { (it + seed + 1).toByte() }
+    val identity = UserIdentity.fromEntropy(crypto, entropy)
+    val deviceKey = crypto.signSeedKeypair(deviceSeed)
+    val cert = DeviceCert.sign(crypto, identity.signing.secretKey, identity.userKey, identity.userBoxKey, deviceKey.publicKey, label, 1_700_000_000L)
+    return FixedActor(identity, deviceKey, cert)
+}
+
+private fun entryTypeName(type: EntryType): String = when (type) {
+    EntryType.GENESIS -> "genesis"
+    EntryType.INVITE_CREATE -> "inviteCreate"
+    EntryType.INVITE_REVOKE -> "inviteRevoke"
+    EntryType.JOIN -> "join"
+    EntryType.APPROVE -> "approve"
+    EntryType.REJECT -> "reject"
+    EntryType.REMOVE -> "remove"
+    EntryType.LEAVE -> "leave"
+    EntryType.SET_ROLE -> "setRole"
+    EntryType.TRANSFER_OWNER -> "transferOwner"
+    EntryType.EPOCH_ROTATE -> "epochRotate"
+    EntryType.ROOM_SETTINGS -> "roomSettings"
+}
+
+private fun genesisBody(nonce: ByteArray) = CborValue.Map(linkedMapOf(
+    0L to CborValue.Bytes(nonce),
+    1L to CborValue.Text("relay.squaddle.org"),
+    2L to CborValue.Bytes(ByteArray(48)),
+))
+private fun inviteCreateBody(inviteId: ByteArray, requiresApproval: Boolean = false) = CborValue.Map(linkedMapOf(
+    0L to CborValue.Bytes(inviteId),
+    3L to CborValue.Bool(requiresApproval),
+    4L to CborValue.Text("member"),
+))
+private fun joinBody(inviteId: ByteArray) = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
+private fun approveBody(user: ByteArray) = CborValue.Map(mapOf(0L to CborValue.Bytes(user), 1L to CborValue.Bytes(ByteArray(32))))
+private fun removeBody(user: ByteArray) = CborValue.Map(mapOf(0L to CborValue.Bytes(user)))
+private fun leaveBody() = CborValue.Map(emptyMap())
+private fun setRoleBody(user: ByteArray, role: String) = CborValue.Map(mapOf(0L to CborValue.Bytes(user), 1L to CborValue.Text(role)))
+private fun transferOwnerBody(user: ByteArray) = CborValue.Map(mapOf(0L to CborValue.Bytes(user)))
+private fun epochRotateBody(epoch: Long, users: List<ByteArray>) = CborValue.Map(mapOf(
+    0L to CborValue.UInt(epoch),
+    1L to CborValue.Array(users.map { CborValue.Map(mapOf(0L to CborValue.Bytes(it), 1L to CborValue.Bytes(ByteArray(48)))) }),
+))
+private fun roomSettingsBody() = CborValue.Map(emptyMap())
+
+/** Drives one room's log for vector generation - mirrors core's own MembershipStateTest helper. */
+private class Chain(val crypto: Crypto, val roomId: ByteArray) {
+    var state: MembershipState = MembershipStateImpl.empty(crypto)
+    var index: Long = 0L
+    var head: ByteArray? = null
+    val appliedEntries = mutableListOf<LogEntry>()
+
+    fun build(actor: FixedActor, type: EntryType, body: CborValue.Map): LogEntry =
+        LogEntry.sign(crypto, actor.deviceKey.secretKey, roomId, index, head, actor.identity.userKey, actor.cert, type, body, 1_700_000_000L + index)
+
+    fun apply(entry: LogEntry, rts: Long = 1_700_000_500L): MembershipState {
+        state = state.apply(StoredEntry(entry, rts)).getOrThrow()
+        index = entry.index + 1
+        head = entry.entryHash(crypto)
+        appliedEntries += entry
+        return state
+    }
+
+    fun rejects(entry: LogEntry, rts: Long = 1_700_000_500L): RejectReason {
+        val result = state.apply(StoredEntry(entry, rts))
+        return (result.exceptionOrNull() as? MembershipRejectException)?.reason
+            ?: error("generator bug: expected a reject, got $result")
+    }
+}
+
+private fun logEntryVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val roomNonce = ByteArray(16) { (it + 40).toByte() }
+    val owner = fixedActor(crypto, 0, "Owner Phone")
+    val member = fixedActor(crypto, 1000, "Member Phone")
+    val inviteId = ByteArray(16) { (it + 50).toByte() }
+    val rid = roomId(crypto, owner.identity.userKey, roomNonce)
+    val chain = Chain(crypto, rid)
+
+    chain.apply(chain.build(owner, EntryType.GENESIS, genesisBody(roomNonce)))
+    chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(inviteId)))
+    chain.apply(chain.build(member, EntryType.JOIN, joinBody(inviteId)))
+    chain.apply(chain.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey, member.identity.userKey))))
+    chain.apply(chain.build(owner, EntryType.REMOVE, removeBody(member.identity.userKey)))
+    chain.apply(chain.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(2, listOf(owner.identity.userKey))))
+
+    addJsonObject {
+        put("name", "logentry-chain")
+        putJsonObject("input") { put("room", rid.b64()) }
+        putJsonObject("expected") {
+            putJsonArray("entries") {
+                for (e in chain.appliedEntries) {
+                    addJsonObject {
+                        put("index", e.index)
+                        put("type", entryTypeName(e.type))
+                        put("cbor", CanonicalCborCodec.encode(e.toFullCbor()).b64())
+                        put("entryHash", e.entryHash(crypto).b64())
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun JsonArrayBuilder.addLogReject(roomId: ByteArray, name: String, prefix: List<LogEntry>, bad: LogEntry, reason: RejectReason) {
+    addJsonObject {
+        put("name", name)
+        putJsonObject("input") {
+            put("room", roomId.b64())
+            putJsonArray("prefix") { prefix.forEach { add(CanonicalCborCodec.encode(it.toFullCbor()).b64()) } }
+            put("entry", CanonicalCborCodec.encode(bad.toFullCbor()).b64())
+        }
+        putJsonObject("expected") {
+            put("accept", false)
+            put("reason", reason.toString())
+        }
+    }
+}
+
+/** One reject vector per §3.3 row, plus one chain-level (not type-specific) stale-head case. */
+private fun logRejectVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val owner = fixedActor(crypto, 0, "Owner Phone")
+    val member = fixedActor(crypto, 1000, "Member Phone")
+    val admin = fixedActor(crypto, 2000, "Admin Phone")
+
+    fun freshChain(): Pair<Chain, ByteArray> {
+        val nonce = ByteArray(16) { (it + 40).toByte() }
+        val rid = roomId(crypto, owner.identity.userKey, nonce)
+        val chain = Chain(crypto, rid)
+        chain.apply(chain.build(owner, EntryType.GENESIS, genesisBody(nonce)))
+        return chain to rid
+    }
+
+    // row 0: genesis - re-genesis after the room already exists
+    run {
+        val (chain, rid) = freshChain()
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.GENESIS, genesisBody(ByteArray(16) { (it + 90).toByte() }))
+        addLogReject(rid, "log-reject-re-genesis", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 1: inviteCreate - non-admin author
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(member, EntryType.INVITE_CREATE, inviteCreateBody(ByteArray(16) { (it + 51).toByte() }))
+        addLogReject(rid, "log-reject-inviteCreate-unauthorized", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 2: inviteRevoke - non-admin author
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(member, EntryType.INVITE_REVOKE, CborValue.Map(mapOf(0L to CborValue.Bytes(invite0))))
+        addLogReject(rid, "log-reject-inviteRevoke-unauthorized", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 3: join - revoked invite
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(owner, EntryType.INVITE_REVOKE, CborValue.Map(mapOf(0L to CborValue.Bytes(invite0)))))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(member, EntryType.JOIN, joinBody(invite0))
+        addLogReject(rid, "log-reject-join-invite-revoked", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 4: approve - target not pending
+    run {
+        val (chain, rid) = freshChain()
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.APPROVE, approveBody(owner.identity.userKey))
+        addLogReject(rid, "log-reject-approve-target-not-pending", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 5: reject - target not pending
+    run {
+        val (chain, rid) = freshChain()
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.REJECT, CborValue.Map(mapOf(0L to CborValue.Bytes(owner.identity.userKey))))
+        addLogReject(rid, "log-reject-reject-target-not-pending", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 6: remove - owner cannot remove self
+    run {
+        val (chain, rid) = freshChain()
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.REMOVE, removeBody(owner.identity.userKey))
+        addLogReject(rid, "log-reject-remove-owner-self", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 7: leave - owner must transferOwner first
+    run {
+        val (chain, rid) = freshChain()
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.LEAVE, leaveBody())
+        addLogReject(rid, "log-reject-leave-owner-must-transfer", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 8: setRole - non-owner author
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(admin, EntryType.JOIN, joinBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        chain.apply(chain.build(owner, EntryType.SET_ROLE, setRoleBody(admin.identity.userKey, "admin")))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(admin, EntryType.SET_ROLE, setRoleBody(member.identity.userKey, "admin"))
+        addLogReject(rid, "log-reject-setRole-non-owner", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 9: transferOwner - target not currently admin
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.TRANSFER_OWNER, transferOwnerBody(member.identity.userKey))
+        addLogReject(rid, "log-reject-transferOwner-target-not-admin", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 10: epochRotate - incomplete member set
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey))) // missing member
+        addLogReject(rid, "log-reject-epochRotate-incomplete-members", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 11: roomSettings - non-admin author
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = chain.build(member, EntryType.ROOM_SETTINGS, roomSettingsBody())
+        addLogReject(rid, "log-reject-roomSettings-unauthorized", prefix, bad, chain.rejects(bad))
+    }
+
+    // chain-level (not type-specific): stale head, as if two clients raced on the same prev
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        val staleHead = chain.head
+        val staleIndex = chain.index
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val bad = LogEntry.sign(crypto, member.deviceKey.secretKey, rid, staleIndex, staleHead, member.identity.userKey, member.cert, EntryType.JOIN, joinBody(invite0), 1L)
+        addLogReject(rid, "log-reject-stale-head", prefix, bad, chain.rejects(bad))
+    }
+}
+
+private fun inviteVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val inviteSecret = ByteArray(32) { (it + 80).toByte() }
+    val roomIdBytes = ByteArray(32) { (it + 90).toByte() }
+    val inviteId = ByteArray(16) { (it + 100).toByte() }
+    val epochKey = ByteArray(32) { (it + 110).toByte() }
+    val roomName = "Board Game Night"
+
+    val envelope = InviteEnvelope.seal(crypto, inviteSecret, roomIdBytes, inviteId, epoch = 0L, epochKey = epochKey, roomName = roomName)
+    val opened = InviteEnvelope.open(crypto, inviteSecret, roomIdBytes, inviteId, envelope)
+    check(opened != null && opened.epoch == 0L && opened.roomName == roomName) { "generator bug: invite envelope round trip failed" }
+
+    addJsonObject {
+        put("name", "invite-basic")
+        putJsonObject("input") {
+            put("inviteSecret", inviteSecret.b64())
+            put("roomId", roomIdBytes.b64())
+            put("inviteId", inviteId.b64())
+            put("epoch", 0L)
+            put("epochKey", epochKey.b64())
+            put("roomName", roomName)
+        }
+        putJsonObject("expected") {
+            put("accept", true)
+            put("inviteKey", InviteEnvelope.inviteKey(crypto, inviteSecret).b64())
+            put("envelope", envelope.b64())
+        }
+    }
+
+    val tampered = envelope.copyOf().also { it[it.size - 1] = it[it.size - 1].inc() }
+    check(InviteEnvelope.open(crypto, inviteSecret, roomIdBytes, inviteId, tampered) == null) { "generator bug: tampered invite envelope still opens" }
+    addJsonObject {
+        put("name", "invite-reject-tampered-ciphertext")
+        putJsonObject("input") {
+            put("inviteSecret", inviteSecret.b64())
+            put("roomId", roomIdBytes.b64())
+            put("inviteId", inviteId.b64())
+            put("envelope", tampered.b64())
+        }
+        putJsonObject("expected") {
+            put("accept", false)
+            put("reason", "AEAD authentication failed")
         }
     }
 }
