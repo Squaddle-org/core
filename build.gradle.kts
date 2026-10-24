@@ -20,6 +20,12 @@ kotlin {
         compileSdk = 36
         minSdk = 26
         withHostTestBuilder {}.configure {}
+        // Real on-device run of the native libsodium bindings (M0 only verified JVM + that this
+        // target compiles) - no emulator/device in this sandbox, so only compilation is verified
+        // here; run `./gradlew connectedAndroidTest` on real hardware.
+        withDeviceTestBuilder { sourceSetTreeName = "test" }.configure {
+            instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        }
     }
     // M5: js(IR) { browser() } / wasmJs { browser() } — only after verifying libsodium bindings support it
     // M6: iosArm64(); iosSimulatorArm64()
@@ -41,6 +47,12 @@ kotlin {
         }
         getByName("androidHostTest").dependencies {
             implementation(kotlin("test"))
+        }
+        getByName("androidDeviceTest").dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.coroutines.test)
+            implementation(libs.androidx.test.runner)
+            implementation(libs.androidx.test.ext.junit)
         }
     }
 }
