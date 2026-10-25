@@ -63,6 +63,14 @@ public class MembershipHistory private constructor(
         return state?.roleOf(user)
     }
 
+    /** Same snapshot-fallback lookup as [roleAt], for §3.3 row 11 field 1
+     * (`membersCanCreateEvents`). Defaults to `true` if no snapshot exists at all (e.g. looking up
+     * an epoch before the room has any history yet). */
+    public fun membersCanCreateEventsAt(epoch: Long): Boolean {
+        val state = snapshots[epoch] ?: snapshots.keys.filter { it <= epoch }.maxOrNull()?.let { snapshots[it] }
+        return state?.membersCanCreateEvents ?: true
+    }
+
     public companion object {
         public fun build(entries: List<StoredEntry>, empty: MembershipState): MembershipHistory {
             var state = empty
@@ -129,11 +137,6 @@ public data class Profile(val displayName: String, val emoji: String?, val stamp
  * Immutable; [fold] is a pure function over a collection with no order dependence - every field
  * converges to its max-[LwwStamp] write regardless of the order ops are supplied in, which is
  * exactly what makes the result order-independent (see `RoomStateTest`'s permutation property).
- *
- * `event.create`'s "admin, or member if room setting allows" (§4.2) is only implemented for its
- * fully-specified half (admin/owner) - the room-setting half needs a field number PROTOCOL.md's
- * §3.3 `roomSettings` body never gives (`{0:joinApprovalDefault?, …}` - the "…" covers fields the
- * spec never numbers). Needs a spec PR before a plain member can ever create events here.
  */
 public data class RoomState(
     val ideas: Map<String, Idea> = emptyMap(),
@@ -160,7 +163,7 @@ public data class RoomState(
                     is OpBody.VoteSet -> state.withVote(env, body, stamp)
                     is OpBody.CommentAdd -> state.withCommentAdd(env, body, stamp)
                     is OpBody.CommentDelete -> state.withCommentDelete(env, body, role, stamp)
-                    is OpBody.EventCreate -> state.withEventCreate(env, body, role, stamp)
+                    is OpBody.EventCreate -> state.withEventCreate(env, body, role, stamp, history)
                     is OpBody.EventSet -> state.withEventField(env, body.id, role) { it.withField(body.field, body.value, stamp) }
                     is OpBody.EventCancel -> state.withEventCancel(env, body, role, stamp)
                     is OpBody.RsvpSet -> state.withRsvp(env, body, stamp)
@@ -219,10 +222,14 @@ public data class RoomState(
         return copy(comments = comments + (key to comment.copy(deleted = true, deletedStamp = stamp)))
     }
 
-    private fun withEventCreate(env: OpEnvelope, body: OpBody.EventCreate, role: Role?, stamp: LwwStamp): RoomState {
+    /** "admin, or member if room setting allows" (§4.2) - the room setting is §3.3 row 11 field 1,
+     * `membersCanCreateEvents` (default `true`), evaluated against the roster at the op's epoch
+     * just like [role] itself. */
+    private fun withEventCreate(env: OpEnvelope, body: OpBody.EventCreate, role: Role?, stamp: LwwStamp, history: MembershipHistory): RoomState {
         val key = body.id.toKey()
         if (events.containsKey(key)) return this
-        if (!role.isAdminOrOwner()) return this // see the class doc comment re: the member-permission half
+        val authorized = role.isAdminOrOwner() || (role == Role.MEMBER && history.membersCanCreateEventsAt(env.epoch))
+        if (!authorized) return this
         val event = Event(
             id = body.id, createdBy = env.author, ideaId = body.ideaId,
             title = body.title, titleStamp = stamp,

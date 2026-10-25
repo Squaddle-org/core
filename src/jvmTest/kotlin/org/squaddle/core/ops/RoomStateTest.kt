@@ -210,7 +210,9 @@ class RoomStateTest {
     }
 
     @Test
-    fun eventCreateByPlainMemberIsRejected() = runTest {
+    fun eventCreateByPlainMemberIsAuthorizedByDefault() = runTest {
+        // §3.3 row 11 field 1 (membersCanCreateEvents) defaults to true - no roomSettings entry
+        // needed for a plain member to create an event.
         val crypto = crypto()
         val (room, _, member) = setUpOwnerAndMember(crypto)
         val eventId = crypto.randomBytes(16)
@@ -218,7 +220,39 @@ class RoomStateTest {
         val body = open(crypto, env, room.epochKey, listOf(member))!!
 
         val state = RoomState.fold(listOf(env to body), room.history())
+        assertEquals("Game night", state.events.values.single().title)
+    }
+
+    @Test
+    fun eventCreateByPlainMemberIsRejectedWhenSettingDisabled() = runTest {
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        room.apply(owner, EntryType.ROOM_SETTINGS, CborValue.Map(mapOf(1L to CborValue.Bool(false))))
+
+        val eventId = crypto.randomBytes(16)
+        val env = room.op(member, OpBody.EventCreate(eventId, null, "Game night", 1_700_000_000L, null, "UTC", null, false))
+        val body = open(crypto, env, room.epochKey, listOf(member))!!
+
+        val state = RoomState.fold(listOf(env to body), room.history())
         assertTrue(state.events.isEmpty())
+    }
+
+    @Test
+    fun eventCreateAuthorizationIsEvaluatedAtOpsEpoch() = runTest {
+        // A member's op stamped at epoch 0 (membersCanCreateEvents still true there) must stay
+        // authorized even after the setting is later disabled at epoch 1 - same epoch-pinning
+        // RoomStateTest already relies on for roleAt().
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        val eventId = crypto.randomBytes(16)
+        val env = room.op(member, OpBody.EventCreate(eventId, null, "Game night", 1_700_000_000L, null, "UTC", null, false))
+        val body = open(crypto, env, room.epochKey, listOf(member))!!
+
+        room.apply(owner, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey, member.identity.userKey)))
+        room.apply(owner, EntryType.ROOM_SETTINGS, CborValue.Map(mapOf(1L to CborValue.Bool(false))))
+
+        val state = RoomState.fold(listOf(env to body), room.history())
+        assertEquals("Game night", state.events.values.single().title)
     }
 
     @Test
