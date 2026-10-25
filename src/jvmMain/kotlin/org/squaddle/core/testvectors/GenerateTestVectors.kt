@@ -29,7 +29,11 @@ import org.squaddle.core.membership.MembershipStateImpl
 import org.squaddle.core.membership.RejectReason
 import org.squaddle.core.membership.StoredEntry
 import org.squaddle.core.membership.roomId
+import org.squaddle.core.ops.OpBody
+import org.squaddle.core.ops.OpEnvelope
+import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
+import org.squaddle.core.ops.encode
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -53,6 +57,7 @@ public fun main(args: Array<String>) {
         writeJson(File(outDir, "log-reject.json"), logRejectVectors(crypto))
         writeJson(File(outDir, "invite.json"), inviteVectors(crypto))
         writeJson(File(outDir, "snapshot.json"), snapshotVectors(crypto))
+        writeJson(File(outDir, "op.json"), opVectors(crypto))
     }
 }
 
@@ -616,6 +621,103 @@ private fun JsonArrayBuilder.addRejectSnapshot(crypto: Crypto, name: String, sna
     addJsonObject {
         put("name", name)
         putJsonObject("input") { put("cbor", CanonicalCborCodec.encode(snapshot.toFullCbor()).b64()) }
+        putJsonObject("expected") {
+            put("accept", false)
+            put("reason", reason)
+        }
+    }
+}
+
+// ---- op.json : PROTOCOL.md §4.1 ----
+
+private fun opVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val a = fixedActor(crypto, 300, "Owner Phone")
+    val impostor = fixedActor(crypto, 400, "Impostor Phone")
+    val room = ByteArray(32) { (it + 60).toByte() }
+    val nonce = ByteArray(24) { (it + 70).toByte() } // fixed: vectors must be reproducible, never crypto.randomBytes()
+    val epochKeyA = ByteArray(32) { (it + 80).toByte() }
+    val epochKeyB = ByteArray(32) { (it + 90).toByte() } // a different (wrong) key, for the reject case
+    val body = OpBody.IdeaCreate(ByteArray(16) { (it + 100).toByte() }, "Camping trip", "long weekend", listOf("outdoors"))
+
+    val valid = OpEnvelope.create(
+        crypto = crypto, deviceSecretKey = a.deviceKey.secretKey, epochKey = epochKeyA,
+        room = room, epoch = 1L, author = a.identity.userKey, device = a.deviceKey.publicKey,
+        seq = 1L, lamport = 1L, body = body, nonce = nonce,
+    )
+    check(valid.verify(crypto)) { "generator bug: valid OpEnvelope vector does not verify" }
+    val opened = valid.open(crypto, epochKeyA) { d -> if (d.contentEquals(a.deviceKey.publicKey)) a.cert else null }
+    // OpBody's ByteArray fields make == reference equality, not content equality - compare
+    // re-encoded canonical CBOR instead (deterministic, so equal bytes <=> equal content).
+    check(opened is OpOpenResult.Ok && opened.body.encode().contentEquals(body.encode())) {
+        "generator bug: valid OpEnvelope vector does not open to the expected body"
+    }
+
+    addJsonObject {
+        put("name", "op-basic")
+        putJsonObject("input") {
+            put("room", room.b64())
+            put("epoch", 1L)
+            put("author", a.identity.userKey.b64())
+            put("device", a.deviceKey.publicKey.b64())
+            put("seq", 1L)
+            put("lamport", 1L)
+            put("nonce", nonce.b64())
+            put("epochKey", epochKeyA.b64())
+            putJsonObject("body") { put("type", "idea.create") }
+        }
+        putJsonObject("expected") {
+            put("accept", true)
+            put("ad", CanonicalCborCodec.encode(valid.toAdCbor()).b64())
+            put("unsignedCbor", CanonicalCborCodec.encode(valid.toUnsignedCbor()).b64())
+            put("signingInput", crypto.signingInput(OpEnvelope.DOMAIN, CanonicalCborCodec.encode(valid.toUnsignedCbor())).b64())
+            put("sig", valid.sig!!.b64())
+            put("cbor", CanonicalCborCodec.encode(valid.toFullCbor()).b64())
+            put("opId", valid.opId(crypto).b64())
+            put("plaintextCbor", body.encode().b64())
+        }
+    }
+
+    val tamperedSig = valid.sig!!.copyOf().also { it[0] = it[0].inc() }
+    addRejectOp(crypto, "op-reject-tampered-signature", valid.copy(sig = tamperedSig), epochKeyA, listOf(a.cert), "signature does not verify")
+
+    // Wrong epoch key: this exact, validly-signed envelope, opened with a different key than it
+    // was actually encrypted under.
+    addRejectOp(crypto, "op-reject-wrong-epoch-key", valid, epochKeyB, listOf(a.cert), "AEAD authentication failed")
+
+    // Tampered ad: the same ct (sealed under epoch=1's ad) spliced into an envelope that
+    // otherwise, self-consistently, claims epoch=2 (and is validly re-signed for THAT claim) -
+    // verify() alone can't catch this, since epoch is part of the signed content too and this
+    // envelope's signature is perfectly self-consistent; only the AEAD step (which recomputes ad
+    // from the envelope's *current* fields) catches the splice.
+    val adTampered = OpEnvelope.sign(
+        crypto, a.deviceKey.secretKey, room, epoch = 2L, a.identity.userKey, a.deviceKey.publicKey,
+        seq = 1L, lamport = 1L, nonce = nonce, ct = valid.ct,
+    )
+    check(adTampered.verify(crypto)) { "generator bug: ad-splice OpEnvelope vector does not verify" }
+    addRejectOp(crypto, "op-reject-tampered-ad", adTampered, epochKeyA, listOf(a.cert), "AEAD authentication failed")
+
+    // Device not certified for author: signed validly by impostor's own device, but claims to be
+    // authored by `a`.
+    val impostorOp = OpEnvelope.create(
+        crypto = crypto, deviceSecretKey = impostor.deviceKey.secretKey, epochKey = epochKeyA,
+        room = room, epoch = 1L, author = a.identity.userKey, device = impostor.deviceKey.publicKey,
+        seq = 1L, lamport = 1L, body = body, nonce = nonce,
+    )
+    addRejectOp(crypto, "op-reject-device-not-certified", impostorOp, epochKeyA, listOf(a.cert, impostor.cert), "device not certified for author")
+}
+
+private fun JsonArrayBuilder.addRejectOp(crypto: Crypto, name: String, op: OpEnvelope, epochKey: ByteArray, certs: List<DeviceCert>, reason: String) {
+    val certOf: (ByteArray) -> DeviceCert? = { device -> certs.firstOrNull { it.device.contentEquals(device) } }
+    val result = op.open(crypto, epochKey, certOf)
+    check(result is OpOpenResult.Reject) { "generator bug: reject OpEnvelope vector '$name' opened successfully, want reject" }
+    check(result.reason == reason) { "generator bug: reject OpEnvelope vector '$name' got reason '${result.reason}', want '$reason'" }
+    addJsonObject {
+        put("name", name)
+        putJsonObject("input") {
+            put("cbor", CanonicalCborCodec.encode(op.toFullCbor()).b64())
+            put("epochKey", epochKey.b64())
+            putJsonArray("certs") { certs.forEach { add(CanonicalCborCodec.encode(it.toFullCbor()).b64()) } }
+        }
         putJsonObject("expected") {
             put("accept", false)
             put("reason", reason)

@@ -24,7 +24,10 @@ import org.squaddle.core.membership.LogEntry
 import org.squaddle.core.membership.MembershipState
 import org.squaddle.core.membership.MembershipStateImpl
 import org.squaddle.core.membership.StoredEntry
+import org.squaddle.core.ops.OpEnvelope
+import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
+import org.squaddle.core.ops.decodeOpBody
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -269,6 +272,70 @@ class TestVectorsVerificationTest {
                 crypto.signingInput(Snapshot.DOMAIN, CanonicalCborCodec.encode(snapshot.toUnsignedCbor())),
                 name,
             )
+        }
+    }
+
+    /** Minimal decoder for the full 0..9 field OpEnvelope CBOR shape used by test-vector input. */
+    private fun decodeOpEnvelope(bytes: ByteArray): OpEnvelope {
+        val map = (CanonicalCborCodec.decode(bytes) as CborValue.Map).entries
+        return OpEnvelope(
+            v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+            room = (map.getValue(1L) as CborValue.Bytes).value,
+            epoch = (map.getValue(2L) as CborValue.UInt).value,
+            author = (map.getValue(3L) as CborValue.Bytes).value,
+            device = (map.getValue(4L) as CborValue.Bytes).value,
+            seq = (map.getValue(5L) as CborValue.UInt).value,
+            lamport = (map.getValue(6L) as CborValue.UInt).value,
+            nonce = (map.getValue(7L) as CborValue.Bytes).value,
+            ct = (map.getValue(8L) as CborValue.Bytes).value,
+            sig = (map[9L] as? CborValue.Bytes)?.value,
+        )
+    }
+
+    @Test
+    fun opVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("op.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val input = obj["input"]!!.jsonObject
+            val expected = obj["expected"]!!.jsonObject
+            val accept = expected["accept"]!!.jsonPrimitive.booleanOrNull!!
+
+            if (!accept) {
+                val op = decodeOpEnvelope(b64(input["cbor"]!!.jsonPrimitive.content))
+                val epochKey = b64(input["epochKey"]!!.jsonPrimitive.content)
+                val certs = input["certs"]!!.jsonArray.map { decodeDeviceCertFromMap((CanonicalCborCodec.decode(b64(it.jsonPrimitive.content)) as CborValue.Map).entries) }
+                val result = op.open(crypto, epochKey) { device -> certs.firstOrNull { it.device.contentEquals(device) } }
+                assertTrue(result is OpOpenResult.Reject, name)
+                assertEquals(expected["reason"]!!.jsonPrimitive.content, result.reason, name)
+                continue
+            }
+
+            val op = decodeOpEnvelope(b64(expected["cbor"]!!.jsonPrimitive.content))
+            assertTrue(op.verify(crypto), name)
+            assertContentEquals(b64(input["room"]!!.jsonPrimitive.content), op.room, name)
+            assertEquals(input["epoch"]!!.jsonPrimitive.long, op.epoch, name)
+            assertContentEquals(b64(input["author"]!!.jsonPrimitive.content), op.author, name)
+            assertContentEquals(b64(input["device"]!!.jsonPrimitive.content), op.device, name)
+            assertEquals(input["seq"]!!.jsonPrimitive.long, op.seq, name)
+            assertEquals(input["lamport"]!!.jsonPrimitive.long, op.lamport, name)
+            assertContentEquals(b64(input["nonce"]!!.jsonPrimitive.content), op.nonce, name)
+            assertContentEquals(b64(expected["sig"]!!.jsonPrimitive.content), op.sig!!, name)
+            assertContentEquals(b64(expected["opId"]!!.jsonPrimitive.content), op.opId(crypto), name)
+            assertContentEquals(b64(expected["ad"]!!.jsonPrimitive.content), CanonicalCborCodec.encode(op.toAdCbor()), name)
+            assertContentEquals(
+                b64(expected["signingInput"]!!.jsonPrimitive.content),
+                crypto.signingInput(OpEnvelope.DOMAIN, CanonicalCborCodec.encode(op.toUnsignedCbor())),
+                name,
+            )
+
+            val epochKey = b64(input["epochKey"]!!.jsonPrimitive.content)
+            val plaintext = crypto.aeadDecrypt(epochKey, op.nonce, op.ct, CanonicalCborCodec.encode(op.toAdCbor()))
+            assertContentEquals(b64(expected["plaintextCbor"]!!.jsonPrimitive.content), plaintext!!, name)
+            val body = decodeOpBody(plaintext)
+            assertTrue(body is org.squaddle.core.ops.OpBody.IdeaCreate, name)
+            assertEquals(input["body"]!!.jsonObject["type"]!!.jsonPrimitive.content, "idea.create", name)
         }
     }
 }
