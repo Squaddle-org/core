@@ -243,6 +243,30 @@ class SyncClientTest {
     }
 
     @Test
+    fun createRoomPersistsGenesisLocallyAndRegistersEpoch0Key() = runTest {
+        val crypto = crypto()
+        val owner = UserIdentity.create(crypto)
+        val device = crypto.signSeedKeypair(crypto.randomBytes(32))
+        val cert = DeviceCert.sign(crypto, owner.signing.secretKey, owner.userKey, owner.userBoxKey, device.publicKey, "Phone", 1L)
+        val roomNonce = crypto.randomBytes(16)
+        val room = roomId(crypto, owner.userKey, roomNonce)
+
+        var postRoomCalls = 0
+        val mockEngine = MockEngine { request ->
+            postRoomCalls++
+            respond("""{"index":0,"rts":500}""".encodeToByteArray(), HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val store = LocalStore(createSqlDriver(":memory:"))
+        val sync = SyncClient(crypto, store, "relay.example.org", owner, device, cert, HttpClient(mockEngine))
+
+        val outcome = sync.createRoom(room, roomNonce)
+        assertEquals(PushOutcome.Ok, outcome)
+        assertEquals(1, postRoomCalls)
+        assertEquals(1, store.logEntriesFrom(room, 0L).size)
+        assertTrue(sync.epochKeyFor(room, 0L) != null)
+    }
+
+    @Test
     fun createInviteUploadsAnEnvelopeForAnOpenInviteAndStoresTheSecret() = runTest {
         val crypto = crypto()
         val owner = UserIdentity.create(crypto)

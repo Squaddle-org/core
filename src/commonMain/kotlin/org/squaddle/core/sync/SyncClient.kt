@@ -226,6 +226,34 @@ public class SyncClient(
         return SyncOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "unparseable error body")
     }
 
+    /** `POST /v1/rooms` (relay-api.yaml) - a distinct one-shot endpoint from [appendLogEntry]'s
+     * `/log` (no `stale_head` concept: a room id either doesn't exist yet or already does).
+     * Generates a fresh epoch-0 key, wraps it for the owner (genesis's own `epoch0Wrapped`,
+     * §3.3 row 0), and registers it locally on success. [roomNonce] must be the same bytes used
+     * to derive [room] via `org.squaddle.core.membership.roomId` - the relay re-derives and
+     * checks this. */
+    public suspend fun createRoom(room: ByteArray, roomNonce: ByteArray): PushOutcome {
+        val epochKey = crypto.randomBytes(32)
+        val sealed = EpochKeys.seal(crypto, userIdentity.userBoxKey, room, 0L, epochKey)
+        val body = CborValue.Map(mapOf(0L to CborValue.Bytes(roomNonce), 1L to CborValue.Text(relayHost), 2L to CborValue.Bytes(sealed)))
+        val entry = LogEntry.sign(crypto, device.secretKey, room, 0L, null, userIdentity.userKey, deviceCert, EntryType.GENESIS, body, nowUnixSeconds())
+        val fullCbor = CanonicalCborCodec.encode(entry.toFullCbor())
+        val resp = authedRequest(HttpMethod.Post, path("/rooms"), fullCbor)
+        if (resp.status != HttpStatusCode.Created) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "room creation failed")
+        }
+        val rts = try {
+            Json.decodeFromString(AppendedBody.serializer(), resp.bodyAsBytes().decodeToString()).rts
+        } catch (e: Exception) {
+            nowUnixSeconds()
+        }
+        store.insertLogEntry(room, 0L, fullCbor, rts)
+        store.upsertCursor(room, 0L, 0L)
+        registerEpochKey(room, 0L, epochKey)
+        return PushOutcome.Ok
+    }
+
     /** Appends one membership-log entry, retrying against a fresh head on `409 stale_head`
      * (PROTOCOL.md §3.3: "the relay accepts an append only if prev == currentHead; else 409,
      * client refetches and retries"). [buildEntry] is handed the index/prev to sign against on
