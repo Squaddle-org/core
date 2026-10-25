@@ -24,6 +24,7 @@ import org.squaddle.core.membership.LogEntry
 import org.squaddle.core.membership.MembershipState
 import org.squaddle.core.membership.MembershipStateImpl
 import org.squaddle.core.membership.StoredEntry
+import org.squaddle.core.ops.Snapshot
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -216,6 +217,58 @@ class TestVectorsVerificationTest {
             assertEquals(input["epoch"]!!.jsonPrimitive.long, opened?.epoch)
             assertContentEquals(b64(input["epochKey"]!!.jsonPrimitive.content), opened?.epochKey)
             assertEquals(input["roomName"]?.jsonPrimitive?.content, opened?.roomName)
+        }
+    }
+
+    /** Minimal decoder for the full 0..8 field Snapshot CBOR shape used by test-vector input. */
+    private fun decodeSnapshot(bytes: ByteArray): Snapshot {
+        val map = (CanonicalCborCodec.decode(bytes) as CborValue.Map).entries
+        return Snapshot(
+            v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+            room = (map.getValue(1L) as CborValue.Bytes).value,
+            epoch = (map.getValue(2L) as CborValue.UInt).value,
+            coversUpTo = (map.getValue(3L) as CborValue.UInt).value,
+            nonce = (map.getValue(4L) as CborValue.Bytes).value,
+            ct = (map.getValue(5L) as CborValue.Bytes).value,
+            author = (map.getValue(6L) as CborValue.Bytes).value,
+            device = (map.getValue(7L) as CborValue.Bytes).value,
+            sig = (map[8L] as? CborValue.Bytes)?.value,
+        )
+    }
+
+    @Test
+    fun snapshotVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("snapshot.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val input = obj["input"]!!.jsonObject
+            val expected = obj["expected"]!!.jsonObject
+            val accept = expected["accept"]!!.jsonPrimitive.booleanOrNull!!
+
+            if (!accept) {
+                val snapshot = decodeSnapshot(b64(input["cbor"]!!.jsonPrimitive.content))
+                assertFalse(snapshot.verify(crypto), name)
+                continue
+            }
+
+            val snapshot = decodeSnapshot(b64(expected["cbor"]!!.jsonPrimitive.content))
+            assertTrue(snapshot.verify(crypto), name)
+            assertContentEquals(b64(input["room"]!!.jsonPrimitive.content), snapshot.room, name)
+            assertEquals(input["epoch"]!!.jsonPrimitive.long, snapshot.epoch, name)
+            assertEquals(input["coversUpTo"]!!.jsonPrimitive.long, snapshot.coversUpTo, name)
+            assertContentEquals(b64(input["nonce"]!!.jsonPrimitive.content), snapshot.nonce, name)
+            assertContentEquals(b64(input["ct"]!!.jsonPrimitive.content), snapshot.ct, name)
+            assertContentEquals(b64(input["author"]!!.jsonPrimitive.content), snapshot.author, name)
+            assertContentEquals(b64(input["device"]!!.jsonPrimitive.content), snapshot.device, name)
+            assertContentEquals(b64(expected["sig"]!!.jsonPrimitive.content), snapshot.sig!!, name)
+            assertContentEquals(b64(expected["ad"]!!.jsonPrimitive.content), CanonicalCborCodec.encode(snapshot.toAdCbor()), name)
+            assertContentEquals(b64(expected["unsignedCbor"]!!.jsonPrimitive.content), CanonicalCborCodec.encode(snapshot.toUnsignedCbor()), name)
+            assertContentEquals(
+                b64(expected["signingInput"]!!.jsonPrimitive.content),
+                crypto.signingInput(Snapshot.DOMAIN, CanonicalCborCodec.encode(snapshot.toUnsignedCbor())),
+                name,
+            )
         }
     }
 }

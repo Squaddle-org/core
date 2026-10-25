@@ -29,6 +29,7 @@ import org.squaddle.core.membership.MembershipStateImpl
 import org.squaddle.core.membership.RejectReason
 import org.squaddle.core.membership.StoredEntry
 import org.squaddle.core.membership.roomId
+import org.squaddle.core.ops.Snapshot
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -51,6 +52,7 @@ public fun main(args: Array<String>) {
         writeJson(File(outDir, "logentry.json"), logEntryVectors(crypto))
         writeJson(File(outDir, "log-reject.json"), logRejectVectors(crypto))
         writeJson(File(outDir, "invite.json"), inviteVectors(crypto))
+        writeJson(File(outDir, "snapshot.json"), snapshotVectors(crypto))
     }
 }
 
@@ -548,6 +550,75 @@ private fun inviteVectors(crypto: Crypto): JsonArray = buildJsonArray {
         putJsonObject("expected") {
             put("accept", false)
             put("reason", "AEAD authentication failed")
+        }
+    }
+}
+
+// ---- snapshot.json : PROTOCOL.md §4.4 ----
+
+private fun snapshotVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val userSignSeed = ByteArray(32) { (it + 130).toByte() }
+    val userKeys = crypto.signSeedKeypair(userSignSeed)
+    val deviceSeed = ByteArray(32) { (it + 140).toByte() }
+    val deviceKeys = crypto.signSeedKeypair(deviceSeed)
+    val room = ByteArray(32) { (it + 150).toByte() }
+    val epoch = 3L
+    val coversUpTo = 1_234L
+    val nonce = ByteArray(24) { (it + 160).toByte() } // fixed: vectors must be reproducible, never crypto.randomBytes()
+    val ct = ByteArray(48) { (it + 170).toByte() } // opaque AEAD ciphertext bytes - relay never decrypts this
+
+    val valid = Snapshot.sign(
+        crypto = crypto,
+        deviceSecretKey = deviceKeys.secretKey,
+        room = room,
+        epoch = epoch,
+        coversUpTo = coversUpTo,
+        nonce = nonce,
+        ct = ct,
+        author = userKeys.publicKey,
+        device = deviceKeys.publicKey,
+    )
+    check(valid.verify(crypto)) { "generator bug: valid Snapshot vector does not verify" }
+    addJsonObject {
+        put("name", "snapshot-basic")
+        putJsonObject("input") {
+            put("room", room.b64())
+            put("epoch", epoch)
+            put("coversUpTo", coversUpTo)
+            put("nonce", nonce.b64())
+            put("ct", ct.b64())
+            put("author", userKeys.publicKey.b64())
+            put("device", deviceKeys.publicKey.b64())
+        }
+        putJsonObject("expected") {
+            put("accept", true)
+            put("ad", CanonicalCborCodec.encode(valid.toAdCbor()).b64())
+            put("unsignedCbor", CanonicalCborCodec.encode(valid.toUnsignedCbor()).b64())
+            put("signingInput", crypto.signingInput(Snapshot.DOMAIN, CanonicalCborCodec.encode(valid.toUnsignedCbor())).b64())
+            put("sig", valid.sig!!.b64())
+            put("cbor", CanonicalCborCodec.encode(valid.toFullCbor()).b64())
+        }
+    }
+
+    val tamperedSig = valid.sig!!.copyOf().also { it[0] = it[0].inc() }
+    addRejectSnapshot(crypto, "snapshot-reject-tampered-signature", valid.copy(sig = tamperedSig), "signature does not verify")
+
+    val crossDomainSig = crypto.sign(deviceKeys.secretKey, crypto.signingInput("op", CanonicalCborCodec.encode(valid.toUnsignedCbor())))
+    addRejectSnapshot(crypto, "snapshot-reject-cross-domain-signature", valid.copy(sig = crossDomainSig), "signed under the wrong domain (\"op\" instead of \"snapshot\")")
+
+    val unknownVersionUnsigned = valid.copy(v = 2, sig = null)
+    val unknownVersionSig = crypto.sign(deviceKeys.secretKey, crypto.signingInput(Snapshot.DOMAIN, CanonicalCborCodec.encode(unknownVersionUnsigned.toUnsignedCbor())))
+    addRejectSnapshot(crypto, "snapshot-reject-unknown-version", unknownVersionUnsigned.copy(sig = unknownVersionSig), "unknown major v=2")
+}
+
+private fun JsonArrayBuilder.addRejectSnapshot(crypto: Crypto, name: String, snapshot: Snapshot, reason: String) {
+    check(!snapshot.verify(crypto)) { "generator bug: reject Snapshot vector '$name' verifies as valid" }
+    addJsonObject {
+        put("name", name)
+        putJsonObject("input") { put("cbor", CanonicalCborCodec.encode(snapshot.toFullCbor()).b64()) }
+        putJsonObject("expected") {
+            put("accept", false)
+            put("reason", reason)
         }
     }
 }
