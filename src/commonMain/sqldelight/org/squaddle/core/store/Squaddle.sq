@@ -1,0 +1,95 @@
+-- Local client-side cache, mirroring what the relay itself persists per room (PROTOCOL.md §3/§4):
+-- this is a cache the sync client rebuilds its view from, never a second source of truth - the
+-- signed log entries and op envelopes it stores are byte-identical to what's on the wire.
+
+CREATE TABLE log_entries (
+  room        BLOB NOT NULL,
+  idx         INTEGER NOT NULL,
+  entry_cbor  BLOB NOT NULL,
+  rts         INTEGER NOT NULL,
+  PRIMARY KEY (room, idx)
+);
+
+insertLogEntry:
+INSERT OR REPLACE INTO log_entries (room, idx, entry_cbor, rts) VALUES (?, ?, ?, ?);
+
+logEntriesFrom:
+SELECT * FROM log_entries WHERE room = ? AND idx >= ? ORDER BY idx ASC;
+
+maxLogIndex:
+SELECT MAX(idx) FROM log_entries WHERE room = ?;
+
+CREATE TABLE ops (
+  room          BLOB NOT NULL,
+  cursor        INTEGER NOT NULL,
+  op_id         BLOB NOT NULL,
+  device        BLOB NOT NULL,
+  seq           INTEGER NOT NULL,
+  envelope_cbor BLOB NOT NULL,
+  PRIMARY KEY (room, cursor)
+);
+
+insertOp:
+INSERT OR REPLACE INTO ops (room, cursor, op_id, device, seq, envelope_cbor) VALUES (?, ?, ?, ?, ?, ?);
+
+opsAfter:
+SELECT * FROM ops WHERE room = ? AND cursor > ? ORDER BY cursor ASC;
+
+maxOpsCursor:
+SELECT MAX(cursor) FROM ops WHERE room = ?;
+
+-- Per-room sync progress: the last log index and ops cursor this client has durably applied -
+-- so `pull()` knows where to resume from after a restart.
+CREATE TABLE cursors (
+  room           BLOB NOT NULL PRIMARY KEY,
+  last_log_index INTEGER NOT NULL,
+  last_ops_cursor INTEGER NOT NULL
+);
+
+upsertCursor:
+INSERT OR REPLACE INTO cursors (room, last_log_index, last_ops_cursor) VALUES (?, ?, ?);
+
+cursorFor:
+SELECT * FROM cursors WHERE room = ?;
+
+-- Per-device last-seen seq within a room - lets the client detect its own gaps locally before
+-- even asking the relay (PROTOCOL.md §4.1: "seq uint per-device monotonic, starts at 1 (gap
+-- detection)"), and is also exactly the "seq vector" a Snapshot's inner format needs (§4.4).
+CREATE TABLE device_seq (
+  room   BLOB NOT NULL,
+  device BLOB NOT NULL,
+  seq    INTEGER NOT NULL,
+  PRIMARY KEY (room, device)
+);
+
+upsertDeviceSeq:
+INSERT OR REPLACE INTO device_seq (room, device, seq) VALUES (?, ?, ?);
+
+deviceSeqsFor:
+SELECT * FROM device_seq WHERE room = ?;
+
+-- Locally-created ops not yet confirmed by the relay. local_order is a client-assigned monotonic
+-- counter (independent of lamport/seq, which the relay cares about) purely so push() drains them
+-- in creation order. envelope_cbor is replaced in place (same local_order) when stale_epoch
+-- re-encryption rewraps a pending op under a new epoch key.
+CREATE TABLE outbox (
+  room          BLOB NOT NULL,
+  local_order   INTEGER NOT NULL,
+  envelope_cbor BLOB NOT NULL,
+  PRIMARY KEY (room, local_order)
+);
+
+insertOutbox:
+INSERT INTO outbox (room, local_order, envelope_cbor) VALUES (?, ?, ?);
+
+replaceOutboxEnvelope:
+UPDATE outbox SET envelope_cbor = ? WHERE room = ? AND local_order = ?;
+
+outboxFor:
+SELECT * FROM outbox WHERE room = ? ORDER BY local_order ASC;
+
+deleteOutboxEntry:
+DELETE FROM outbox WHERE room = ? AND local_order = ?;
+
+maxOutboxLocalOrder:
+SELECT MAX(local_order) FROM outbox WHERE room = ?;

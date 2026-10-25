@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.kotlin.multiplatform.library)
+    alias(libs.plugins.sqldelight)
     `maven-publish`
 }
 
@@ -37,13 +38,20 @@ kotlin {
             implementation(libs.libsodium)
             implementation(libs.ktor.client.core)
             implementation(libs.ktor.client.websockets)
+            implementation(libs.sqldelight.runtime)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
             implementation(libs.coroutines.test)
         }
+        jvmMain.dependencies {
+            implementation(libs.sqldelight.driver.sqlite)
+        }
         jvmTest.dependencies {
             implementation(libs.kotest.property)
+        }
+        getByName("androidMain").dependencies {
+            implementation(libs.sqldelight.driver.android)
         }
         getByName("androidHostTest").dependencies {
             implementation(kotlin("test"))
@@ -53,6 +61,14 @@ kotlin {
             implementation(libs.coroutines.test)
             implementation(libs.androidx.test.runner)
             implementation(libs.androidx.test.ext.junit)
+        }
+    }
+}
+
+sqldelight {
+    databases {
+        create("SquaddleDb") {
+            packageName.set("org.squaddle.core.store")
         }
     }
 }
