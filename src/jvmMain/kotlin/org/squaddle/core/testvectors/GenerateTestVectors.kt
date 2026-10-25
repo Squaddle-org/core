@@ -293,7 +293,11 @@ private fun epochRotateBody(epoch: Long, users: List<ByteArray>) = CborValue.Map
     0L to CborValue.UInt(epoch),
     1L to CborValue.Array(users.map { CborValue.Map(mapOf(0L to CborValue.Bytes(it), 1L to CborValue.Bytes(ByteArray(48)))) }),
 ))
-private fun roomSettingsBody() = CborValue.Map(emptyMap())
+private fun roomSettingsBody(membersCanCreateEvents: Boolean? = null) = CborValue.Map(
+    buildMap {
+        membersCanCreateEvents?.let { put(1L, CborValue.Bool(it)) }
+    },
+)
 
 /** Drives one room's log for vector generation - mirrors core's own MembershipStateTest helper. */
 private class Chain(val crypto: Crypto, val roomId: ByteArray) {
@@ -339,6 +343,7 @@ private fun logEntryVectors(crypto: Crypto): JsonArray = buildJsonArray {
     chain.apply(chain.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(1, listOf(owner.identity.userKey, member.identity.userKey))))
     chain.apply(chain.build(owner, EntryType.REMOVE, removeBody(member.identity.userKey)))
     chain.apply(chain.build(owner, EntryType.EPOCH_ROTATE, epochRotateBody(2, listOf(owner.identity.userKey))))
+    chain.apply(chain.build(owner, EntryType.ROOM_SETTINGS, roomSettingsBody(membersCanCreateEvents = false)))
 
     addJsonObject {
         put("name", "logentry-chain")
@@ -352,6 +357,7 @@ private fun logEntryVectors(crypto: Crypto): JsonArray = buildJsonArray {
                         put("cbor", CanonicalCborCodec.encode(e.toFullCbor()).b64())
                         put("entryHash", e.entryHash(crypto).b64())
                         put("rotationPending", stateAfter.rotationPending)
+                        put("membersCanCreateEvents", stateAfter.membersCanCreateEvents)
                     }
                 }
             }
@@ -505,6 +511,19 @@ private fun logRejectVectors(crypto: Crypto): JsonArray = buildJsonArray {
         val prefix = chain.appliedEntries.toList()
         val bad = chain.build(member, EntryType.ROOM_SETTINGS, roomSettingsBody())
         addLogReject(rid, "log-reject-roomSettings-unauthorized", prefix, bad, chain.rejects(bad))
+    }
+
+    // row 11: roomSettings - membersCanCreateEvents present but not a bool (owner authors it, so
+    // authorization passes and the structural-validation reject is isolated)
+    run {
+        val (chain, rid) = freshChain()
+        val invite0 = ByteArray(16) { (it + 50).toByte() }
+        chain.apply(chain.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(invite0)))
+        chain.apply(chain.build(member, EntryType.JOIN, joinBody(invite0)))
+        val prefix = chain.appliedEntries.toList()
+        val badBody = CborValue.Map(mapOf(1L to CborValue.Text("not-a-bool")))
+        val bad = chain.build(owner, EntryType.ROOM_SETTINGS, badBody)
+        addLogReject(rid, "log-reject-roomSettings-bad-members-can-create-events", prefix, bad, chain.rejects(bad))
     }
 
     // chain-level (not type-specific): stale head, as if two clients raced on the same prev
