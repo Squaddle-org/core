@@ -47,12 +47,24 @@ public class LocalStore(driver: SqlDriver) {
 
     public fun deviceSeqsFor(room: ByteArray): List<Device_seq> = q.deviceSeqsFor(room).executeAsList()
 
-    public fun insertOutbox(room: ByteArray, localOrder: Long, envelopeCbor: ByteArray) {
-        q.insertOutbox(room, localOrder, envelopeCbor)
+    public fun insertOutbox(
+        room: ByteArray,
+        localOrder: Long,
+        epoch: Long,
+        seq: Long,
+        lamport: Long,
+        nonce: ByteArray,
+        bodyCbor: ByteArray,
+        envelopeCbor: ByteArray,
+    ) {
+        q.insertOutbox(room, localOrder, epoch, seq, lamport, nonce, bodyCbor, envelopeCbor)
     }
 
-    public fun replaceOutboxEnvelope(room: ByteArray, localOrder: Long, envelopeCbor: ByteArray) {
-        q.replaceOutboxEnvelope(envelopeCbor, room, localOrder)
+    /** Re-encryption in place (PROTOCOL.md §3.4 stale_epoch retry): [epoch]/[nonce]/[envelopeCbor]
+     * change, [bodyCbor]/[seq]/[lamport] never do - the op's identity and plaintext content don't
+     * change just because it's being sealed under a newer epoch key. */
+    public fun replaceOutboxEnvelope(room: ByteArray, localOrder: Long, epoch: Long, nonce: ByteArray, envelopeCbor: ByteArray) {
+        q.replaceOutboxEnvelope(epoch, nonce, envelopeCbor, room, localOrder)
     }
 
     public fun outboxFor(room: ByteArray): List<Outbox> = q.outboxFor(room).executeAsList()

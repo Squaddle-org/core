@@ -83,14 +83,14 @@ class LocalStoreTest {
     fun outboxDrainsInLocalOrderAndSupportsReplaceAndDelete() {
         val store = newStore()
         val room = ByteArray(32) { it.toByte() }
-        store.insertOutbox(room, 1L, byteArrayOf(1))
-        store.insertOutbox(room, 2L, byteArrayOf(2))
-        store.insertOutbox(room, 3L, byteArrayOf(3))
+        store.insertOutbox(room, 1L, 0L, 1L, 1L, ByteArray(24), byteArrayOf(10), byteArrayOf(1))
+        store.insertOutbox(room, 2L, 0L, 2L, 2L, ByteArray(24), byteArrayOf(20), byteArrayOf(2))
+        store.insertOutbox(room, 3L, 0L, 3L, 3L, ByteArray(24), byteArrayOf(30), byteArrayOf(3))
 
         assertEquals(listOf(1, 2, 3), store.outboxFor(room).map { it.envelope_cbor[0].toInt() })
         assertEquals(3L, store.maxOutboxLocalOrder(room))
 
-        store.replaceOutboxEnvelope(room, 2L, byteArrayOf(99))
+        store.replaceOutboxEnvelope(room, 2L, 1L, ByteArray(24) { 9 }, byteArrayOf(99))
         assertEquals(listOf(1, 99, 3), store.outboxFor(room).map { it.envelope_cbor[0].toInt() })
 
         store.deleteOutboxEntry(room, 1L)

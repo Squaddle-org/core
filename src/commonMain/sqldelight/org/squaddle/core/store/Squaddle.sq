@@ -72,18 +72,29 @@ SELECT * FROM device_seq WHERE room = ?;
 -- counter (independent of lamport/seq, which the relay cares about) purely so push() drains them
 -- in creation order. envelope_cbor is replaced in place (same local_order) when stale_epoch
 -- re-encryption rewraps a pending op under a new epoch key.
+-- body_cbor is the PLAINTEXT OpBody (§4.2), never sent over the wire from here - it's the only
+-- way stale_epoch retry can re-encrypt a pending op under a new key: an AEAD ciphertext can't be
+-- "re-keyed" without its plaintext, so storing only the already-encrypted envelope (as an earlier
+-- version of this schema did) would make re-encryption impossible. envelope_cbor is the current
+-- best-effort signed-and-encrypted form, ready to push as-is; epoch/nonce there always match the
+-- epoch/nonce columns below, kept in sync by replaceOutboxEnvelope.
 CREATE TABLE outbox (
   room          BLOB NOT NULL,
   local_order   INTEGER NOT NULL,
+  epoch         INTEGER NOT NULL,
+  seq           INTEGER NOT NULL,
+  lamport       INTEGER NOT NULL,
+  nonce         BLOB NOT NULL,
+  body_cbor     BLOB NOT NULL,
   envelope_cbor BLOB NOT NULL,
   PRIMARY KEY (room, local_order)
 );
 
 insertOutbox:
-INSERT INTO outbox (room, local_order, envelope_cbor) VALUES (?, ?, ?);
+INSERT INTO outbox (room, local_order, epoch, seq, lamport, nonce, body_cbor, envelope_cbor) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
 replaceOutboxEnvelope:
-UPDATE outbox SET envelope_cbor = ? WHERE room = ? AND local_order = ?;
+UPDATE outbox SET epoch = ?, nonce = ?, envelope_cbor = ? WHERE room = ? AND local_order = ?;
 
 outboxFor:
 SELECT * FROM outbox WHERE room = ? ORDER BY local_order ASC;
