@@ -28,6 +28,7 @@ import org.squaddle.core.ops.OpEnvelope
 import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
 import org.squaddle.core.ops.decodeOpBody
+import org.squaddle.core.sync.RequestAuth
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -336,6 +337,30 @@ class TestVectorsVerificationTest {
             val body = decodeOpBody(plaintext)
             assertTrue(body is org.squaddle.core.ops.OpBody.IdeaCreate, name)
             assertEquals(input["body"]!!.jsonObject["type"]!!.jsonPrimitive.content, "idea.create", name)
+        }
+    }
+
+    @Test
+    fun requestAuthVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("request-auth.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val input = obj["input"]!!.jsonObject
+            val expected = obj["expected"]!!.jsonObject
+
+            val method = input["method"]!!.jsonPrimitive.content
+            val pathAndQuery = input["pathAndQuery"]!!.jsonPrimitive.content
+            val ts = input["ts"]!!.jsonPrimitive.long
+            val body = b64(input["body"]!!.jsonPrimitive.content)
+            val device = b64(input["device"]!!.jsonPrimitive.content)
+
+            val signingInput = RequestAuth.signingInput(crypto, method, pathAndQuery, ts, body)
+            assertContentEquals(b64(expected["signingInput"]!!.jsonPrimitive.content), signingInput, name)
+
+            val sig = b64(expected["sig"]!!.jsonPrimitive.content)
+            assertTrue(crypto.verify(device, signingInput, sig), name)
+            assertEquals(expected["header"]!!.jsonPrimitive.content, "SQDL1 device=${input["device"]!!.jsonPrimitive.content}, ts=$ts, sig=${expected["sig"]!!.jsonPrimitive.content}", name)
         }
     }
 }

@@ -34,6 +34,7 @@ import org.squaddle.core.ops.OpEnvelope
 import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
 import org.squaddle.core.ops.encode
+import org.squaddle.core.sync.RequestAuth
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -58,6 +59,7 @@ public fun main(args: Array<String>) {
         writeJson(File(outDir, "invite.json"), inviteVectors(crypto))
         writeJson(File(outDir, "snapshot.json"), snapshotVectors(crypto))
         writeJson(File(outDir, "op.json"), opVectors(crypto))
+        writeJson(File(outDir, "request-auth.json"), requestAuthVectors(crypto))
     }
 }
 
@@ -721,6 +723,49 @@ private fun JsonArrayBuilder.addRejectOp(crypto: Crypto, name: String, op: OpEnv
         putJsonObject("expected") {
             put("accept", false)
             put("reason", reason)
+        }
+    }
+}
+
+// ---- request-auth.json : PROTOCOL.md §5 ----
+
+private class RequestAuthCase(val name: String, val method: String, val pathAndQuery: String, val ts: Long, val body: ByteArray)
+
+private fun requestAuthVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val deviceSeed = ByteArray(32) { (it + 200).toByte() }
+    val device = crypto.signSeedKeypair(deviceSeed)
+
+    val cases = listOf(
+        RequestAuthCase("request-auth-get-no-query", "GET", "/v1/rooms/YmFzZTMycm9vbWlk/log", 1_700_000_000L, ByteArray(0)),
+        RequestAuthCase("request-auth-get-with-query", "GET", "/v1/rooms/YmFzZTMycm9vbWlk/ops?after=5&limit=100", 1_700_000_100L, ByteArray(0)),
+        // body bytes here are arbitrary CBOR-looking filler, not a real OpEnvelope batch - this
+        // formula treats the body as opaque, so its actual content is irrelevant to the vector.
+        RequestAuthCase("request-auth-post-with-body", "POST", "/v1/rooms/YmFzZTMycm9vbWlk/ops", 1_700_000_200L, byteArrayOf(0x81.toByte(), 0x00)),
+        RequestAuthCase("request-auth-put-with-body", "PUT", "/v1/users/dXNlcg/devices/ZGV2aWNl", 1_700_000_300L, "device-cert-bytes".encodeToByteArray()),
+    )
+
+    for (case in cases) {
+        val header = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, case.method, case.pathAndQuery, case.ts, case.body)
+        val signingInput = RequestAuth.signingInput(crypto, case.method, case.pathAndQuery, case.ts, case.body)
+        val sigB64 = header.substringAfter("sig=")
+        val sig = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).decode(sigB64)
+        check(crypto.verify(device.publicKey, signingInput, sig)) {
+            "generator bug: request-auth vector '${case.name}' sig does not verify its own signingInput"
+        }
+        addJsonObject {
+            put("name", case.name)
+            putJsonObject("input") {
+                put("method", case.method)
+                put("pathAndQuery", case.pathAndQuery)
+                put("ts", case.ts)
+                put("body", case.body.b64())
+                put("device", device.publicKey.b64())
+            }
+            putJsonObject("expected") {
+                put("signingInput", signingInput.b64())
+                put("sig", sigB64)
+                put("header", header)
+            }
         }
     }
 }
