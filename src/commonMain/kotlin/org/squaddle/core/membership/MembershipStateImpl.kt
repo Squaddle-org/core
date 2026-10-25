@@ -33,6 +33,7 @@ public class MembershipStateImpl private constructor(
 
     override fun roleOf(user: ByteArray): Role? = roles[user.hex()]
     override fun invites(): Collection<Invite> = invitesById.values
+    override fun members(): Collection<Member> = roles.map { (hex, role) -> Member(hex.unhex(), role) }
 
     override fun apply(stored: StoredEntry): Result<MembershipState> {
         val entry = stored.entry
@@ -245,6 +246,10 @@ private fun ByteArray.hex(): String {
         sb.append(HEX_CHARS[v and 0x0F])
     }
     return sb.toString()
+}
+
+private fun String.unhex(): ByteArray = ByteArray(length / 2) { i ->
+    (HEX_CHARS.indexOf(this[i * 2]).shl(4) or HEX_CHARS.indexOf(this[i * 2 + 1])).toByte()
 }
 
 private fun Map<Long, CborValue>.bytesOrNull(key: Long): ByteArray? = (this[key] as? CborValue.Bytes)?.value

@@ -137,6 +137,26 @@ class MembershipStateTest {
     }
 
     @Test
+    fun membersEnumeratesEveryCurrentUserIncludingPending() = runTest {
+        val crypto = crypto(); val owner = actor(crypto)
+        val room = freshRoom(crypto, owner)
+        val openMember = actor(crypto)
+        val pendingMember = actor(crypto)
+        val openInvite = crypto.randomBytes(16)
+        val approvalInvite = crypto.randomBytes(16)
+        room.apply(room.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(openInvite, requiresApproval = false)))
+        room.apply(room.build(owner, EntryType.INVITE_CREATE, inviteCreateBody(approvalInvite, requiresApproval = true)))
+        room.apply(room.build(openMember, EntryType.JOIN, joinBody(openInvite)))
+        room.apply(room.build(pendingMember, EntryType.JOIN, joinBody(approvalInvite)))
+
+        val members = room.state.members().associate { it.user.toList() to it.role }
+        assertEquals(3, members.size)
+        assertEquals(Role.OWNER, members[owner.identity.userKey.toList()])
+        assertEquals(Role.MEMBER, members[openMember.identity.userKey.toList()])
+        assertEquals(Role.PENDING, members[pendingMember.identity.userKey.toList()])
+    }
+
+    @Test
     fun inviteCreateRejectsNonAdminAuthor() = runTest {
         val crypto = crypto(); val owner = actor(crypto)
         val room = freshRoom(crypto, owner)

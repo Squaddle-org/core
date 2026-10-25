@@ -145,6 +145,12 @@ public sealed interface RejectReason {
 /** Carries *which* §3.3 row an `apply()` failed, as the payload of the `Result.failure`. */
 public class MembershipRejectException(public val reason: RejectReason) : Exception(reason.toString())
 
+/** One (user, role) pair - for callers that need to enumerate the whole room rather than look up
+ * a single user via [MembershipState.roleOf] (e.g. building an `epochRotate`'s per-user wrap
+ * list, §3.3 row 10: "MUST contain exactly the current non-pending members"). Mirrors relay's own
+ * `membership.Member`/`State.Members()` in `relay/internal/membership/state.go`. */
+public data class Member(public val user: ByteArray, public val role: Role)
+
 /** Immutable - a new [MembershipState] gets a new `Invite` (e.g. `copy(uses = uses + 1)`), never
  * a mutated shared one, so two state snapshots can never alias each other's invite records. */
 public data class Invite(
@@ -169,6 +175,9 @@ public interface MembershipState {
     public val rotationPending: Boolean
     public fun roleOf(user: ByteArray): Role?
     public fun invites(): Collection<Invite>
+
+    /** Every current (user, role) pair, incl. pending. */
+    public fun members(): Collection<Member>
 
     /** Returns the new state or the reason the entry must be rejected. */
     public fun apply(stored: StoredEntry): Result<MembershipState>
