@@ -119,7 +119,8 @@ public class SyncClient(
 
     private suspend fun authedRequest(method: HttpMethod, pathAndQuery: String, body: ByteArray = ByteArray(0)): HttpResponse {
         val ts = nowUnixSeconds()
-        val header = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, method.value, pathAndQuery, ts, body)
+        val nonce = crypto.randomBytes(16)
+        val header = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, method.value, pathAndQuery, ts, nonce, body)
         return httpClient.request("$httpScheme://$relayHost$pathAndQuery") {
             this.method = method
             header("Authorization", header)
@@ -572,7 +573,7 @@ public class SyncClient(
         if (rooms.isEmpty()) return
         val roomRefs = rooms.associateBy { Base32.encode(it) }
         val ts = nowUnixSeconds()
-        val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, ByteArray(0))
+        val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, crypto.randomBytes(16), ByteArray(0))
 
         httpClient.webSocket("$wsScheme://$relayHost${path("/ws")}", request = { header("Authorization", authHeader) }) {
             send(Frame.Text(Json.encodeToString(WsSubscribe.serializer(), WsSubscribe(roomRefs.keys.toList()))))
