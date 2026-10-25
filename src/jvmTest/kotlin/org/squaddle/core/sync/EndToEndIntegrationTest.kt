@@ -62,13 +62,6 @@ class EndToEndIntegrationTest {
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
-    /** Crosses a real wall-clock second boundary - see the call sites' comment for why repeated
-     * same-device, same-query pulls need this. */
-    private fun settleClock() {
-        val startSecond = System.currentTimeMillis() / 1000
-        while (System.currentTimeMillis() / 1000 == startSecond) Thread.sleep(20)
-    }
-
     private fun waitForHealthz(port: Int, timeoutMs: Long = 10_000) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -211,14 +204,6 @@ class EndToEndIntegrationTest {
         assertEquals(PushOutcome.Ok, memberB.sync.push(room))
 
         // --- owner kicks memberA, auto-rotates ---
-        // Ed25519 is deterministic (same device+method+path+ts+body => byte-identical signature),
-        // and request-auth timestamps are whole unix seconds (§5) - a repeat pull with an
-        // unchanged cursor (nothing new to fetch) can collide byte-for-byte with an earlier pull
-        // from the same device within the same wall-clock second, which the relay's replay cache
-        // then correctly rejects as a replay. Same root cause already hit in relay's own Go tests
-        // (fixed there via a testClock); here, just cross a real second boundary before any
-        // same-actor repeat pull.
-        settleClock()
         val ownerPull2 = owner.sync.pull(room)
         assertEquals(SyncOutcome.Ok, ownerPull2, "owner pull (before kick) failed: $ownerPull2")
         val removeOutcome = owner.sync.appendLogEntry(room) { index, prev ->
@@ -234,23 +219,19 @@ class EndToEndIntegrationTest {
         assertEquals(PushOutcome.Ok, owner.sync.autoRotate(room))
 
         // --- memberB posts one more op under the new epoch, after the rotation ---
-        settleClock()
         val memberBPull2 = memberB.sync.pull(room)
         assertEquals(SyncOutcome.Ok, memberBPull2, "memberB pull (after rotation) failed: $memberBPull2")
         assertTrue(memberB.sync.enqueueOp(room, OpBody.VoteSet(ideaId, 1)), "memberB enqueueOp(vote2) failed")
         assertEquals(PushOutcome.Ok, memberB.sync.push(room))
 
         // --- memberA (removed) can no longer read ops ---
-        settleClock()
         val memberAPullAfterKick = memberA.sync.pullOps(room)
         assertTrue(memberAPullAfterKick is SyncOutcome.Error, "expected removed member's ops read to fail, got $memberAPullAfterKick")
         assertEquals("forbidden", memberAPullAfterKick.code)
 
         // --- owner and memberB converge on identical state ---
-        settleClock()
         val ownerPull3 = owner.sync.pull(room)
         assertEquals(SyncOutcome.Ok, ownerPull3, "owner final pull failed: $ownerPull3")
-        settleClock() // memberBPull3 risks colliding with memberBPull2 the same way - see above
         val memberBPull3 = memberB.sync.pull(room)
         assertEquals(SyncOutcome.Ok, memberBPull3, "memberB final pull failed: $memberBPull3")
         val ownerState = materialize(crypto, owner, room)
