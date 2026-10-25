@@ -1,6 +1,5 @@
 package org.squaddle.core.ops
 
-import org.squaddle.core.membership.EntryType
 import org.squaddle.core.membership.MembershipState
 import org.squaddle.core.membership.Role
 import org.squaddle.core.membership.StoredEntry
@@ -41,11 +40,14 @@ private fun Event.withField(field: String, value: Any?, stamp: LwwStamp): Event 
  * sequence - the only thing that lets op authorization be evaluated against "the MembershipState
  * at the op's epoch" rather than whatever the CURRENT roster happens to be (an op's author may
  * since have been removed, promoted, demoted, etc. - that must not retroactively invalidate or
- * reinterpret an op that was legitimately authorized when it was created). A snapshot is taken at
- * epoch 0 (right after genesis) and right after every accepted `epochRotate` - i.e. "the roster as
- * of the *start* of that epoch", not tracking finer-grained role changes that happen later within
- * the same epoch (the relay never links an op to a precise log position, only to an epoch number,
- * so this is the finest granularity the data actually supports).
+ * reinterpret an op that was legitimately authorized when it was created). The snapshot for epoch
+ * N is updated after *every* entry applied while the room's epoch is N (joins, role changes, ...),
+ * not just at the `epochRotate` that started it - an epoch commonly spans many membership changes
+ * before the next rotation (e.g. every join before the room's first rotation is still epoch 0),
+ * and a content op from any point in that span must authorize against the roster as it stood at
+ * that point, which in practice means "the latest roster this epoch ever reached" (the relay never
+ * links an op to a precise log position, only to an epoch number, so that's the finest granularity
+ * the data actually supports - finer than that would need a spec change).
  */
 public class MembershipHistory private constructor(
     private val snapshots: Map<Long, MembershipState>,
@@ -67,9 +69,7 @@ public class MembershipHistory private constructor(
             val snapshots = mutableMapOf<Long, MembershipState>()
             for (stored in entries) {
                 state = state.apply(stored).getOrThrow()
-                if (stored.entry.index == 0L || stored.entry.type == EntryType.EPOCH_ROTATE) {
-                    snapshots[state.epoch] = state
-                }
+                snapshots[state.epoch] = state
             }
             return MembershipHistory(snapshots, state)
         }
