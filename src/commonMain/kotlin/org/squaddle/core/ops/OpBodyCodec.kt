@@ -28,10 +28,14 @@ private fun OpBody.typeName(): String = when (this) {
     is OpBody.Unknown -> type
 }
 
-/** `idea.set`/`event.set`'s polymorphic `value`: a field's own text, a tag list, or absent (clears it). */
+/** `idea.set`/`event.set`'s polymorphic `value`: text (title/desc/tz/location), a tag list,
+ * a timestamp (event start/end), a bool (event allDay), or absent (clears the field). */
 private fun Any?.toValueCbor(): CborValue = when (this) {
     null -> CborValue.Null
     is String -> CborValue.Text(this)
+    is Boolean -> CborValue.Bool(this)
+    is Long -> CborValue.UInt(this)
+    is Int -> CborValue.UInt(this.toLong())
     is List<*> -> CborValue.Array(map { CborValue.Text(it.toString()) })
     else -> throw IllegalArgumentException("unsupported idea.set/event.set value: $this")
 }
@@ -39,6 +43,8 @@ private fun Any?.toValueCbor(): CborValue = when (this) {
 private fun CborValue.fromValueCbor(): Any? = when (this) {
     is CborValue.Null -> null
     is CborValue.Text -> value
+    is CborValue.Bool -> value
+    is CborValue.UInt -> value
     is CborValue.Array -> items.map { (it as CborValue.Text).value }
     else -> throw CborFormatException("unsupported idea.set/event.set value shape")
 }
