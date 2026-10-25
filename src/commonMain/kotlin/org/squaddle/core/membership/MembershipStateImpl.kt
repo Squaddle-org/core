@@ -23,12 +23,13 @@ public class MembershipStateImpl private constructor(
     private val roles: Map<String, Role>,
     private val invitesById: Map<String, Invite>,
     override val rotationPending: Boolean,
+    override val membersCanCreateEvents: Boolean,
 ) : MembershipState {
 
     public companion object {
         /** No room exists yet - the only entry `apply()` will accept from here is a genesis. */
         public fun empty(crypto: Crypto): MembershipState =
-            MembershipStateImpl(crypto, ByteArray(32), ByteArray(32), 0L, 0L, emptyMap(), emptyMap(), rotationPending = false)
+            MembershipStateImpl(crypto, ByteArray(32), ByteArray(32), 0L, 0L, emptyMap(), emptyMap(), rotationPending = false, membersCanCreateEvents = true)
     }
 
     override fun roleOf(user: ByteArray): Role? = roles[user.hex()]
@@ -217,7 +218,13 @@ public class MembershipStateImpl private constructor(
 
     private fun applyRoomSettings(entry: LogEntry, authorRole: Role?): Result<MembershipState> {
         if (authorRole != Role.OWNER && authorRole != Role.ADMIN) return reject(RejectReason.Unauthorized)
-        return next(entry)
+        val body = entry.body.entries
+        val membersCanCreateEvents = if (body.containsKey(1L)) {
+            body.boolOrNull(1L) ?: return reject(RejectReason.Invalid("roomSettings membersCanCreateEvents must be a bool"))
+        } else {
+            this.membersCanCreateEvents
+        }
+        return next(entry, membersCanCreateEvents = membersCanCreateEvents)
     }
 
     // ---- plumbing ----
@@ -228,8 +235,9 @@ public class MembershipStateImpl private constructor(
         invites: Map<String, Invite> = this.invitesById,
         epoch: Long = this.epoch,
         rotationPending: Boolean = this.rotationPending,
+        membersCanCreateEvents: Boolean = this.membersCanCreateEvents,
     ): Result<MembershipState> = Result.success(
-        MembershipStateImpl(crypto, entry.room, entry.entryHash(crypto), entry.index + 1, epoch, roles, invites, rotationPending),
+        MembershipStateImpl(crypto, entry.room, entry.entryHash(crypto), entry.index + 1, epoch, roles, invites, rotationPending, membersCanCreateEvents),
     )
 
     private fun reject(reason: RejectReason): Result<MembershipState> = Result.failure(MembershipRejectException(reason))

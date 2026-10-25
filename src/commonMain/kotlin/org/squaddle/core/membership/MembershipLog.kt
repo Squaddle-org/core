@@ -173,6 +173,11 @@ public interface MembershipState {
      * `epochRotate`. While true, content-plane ops MUST be rejected (`rotation_required`) -
      * membership-log appends other than `epochRotate` are unaffected. */
     public val rotationPending: Boolean
+
+    /** PROTOCOL.md §3.3 row 11 field 1: whether a plain member may author `event.create` (§4.2's
+     * "admin, or member if room setting allows"). Defaults to `true`; owner/admin can flip it via
+     * a `roomSettings` entry. */
+    public val membersCanCreateEvents: Boolean
     public fun roleOf(user: ByteArray): Role?
     public fun invites(): Collection<Invite>
 
