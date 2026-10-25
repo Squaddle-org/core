@@ -28,6 +28,7 @@ import org.squaddle.core.ops.OpEnvelope
 import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
 import org.squaddle.core.ops.decodeOpBody
+import org.squaddle.core.backup.Backup
 import org.squaddle.core.sync.RequestAuth
 import java.io.File
 import kotlin.io.encoding.Base64
@@ -361,6 +362,37 @@ class TestVectorsVerificationTest {
             val sig = b64(expected["sig"]!!.jsonPrimitive.content)
             assertTrue(crypto.verify(device, signingInput, sig), name)
             assertEquals(expected["header"]!!.jsonPrimitive.content, "SQDL1 device=${input["device"]!!.jsonPrimitive.content}, ts=$ts, sig=${expected["sig"]!!.jsonPrimitive.content}", name)
+        }
+    }
+
+    @Test
+    fun backupVectorsVerify() = runTest {
+        val crypto = crypto()
+        for (vector in vectors("backup.json")) {
+            val obj = vector.jsonObject
+            val name = obj["name"]!!.jsonPrimitive.content
+            val input = obj["input"]!!.jsonObject
+            val expected = obj["expected"]!!.jsonObject
+            val accept = expected["accept"]!!.jsonPrimitive.booleanOrNull!!
+
+            if (!accept) {
+                val file = b64(input["file"]!!.jsonPrimitive.content)
+                val passphrase = b64(input["passphrase"]!!.jsonPrimitive.content)
+                assertNull(Backup.restore(crypto, passphrase, file), name)
+                continue
+            }
+
+            val passphrase = b64(input["passphrase"]!!.jsonPrimitive.content)
+            val file = b64(expected["file"]!!.jsonPrimitive.content)
+            val restored = Backup.restore(crypto, passphrase, file)
+            assertTrue(restored != null, name)
+            assertContentEquals(b64(input["entropy"]!!.jsonPrimitive.content), restored.entropy, name)
+            assertEquals(input["createdAt"]!!.jsonPrimitive.long, restored.createdAt, name)
+            val expectedRooms = input["rooms"]!!.jsonArray.map {
+                val r = it.jsonObject
+                r["roomRef"]!!.jsonPrimitive.content to r["name"]?.jsonPrimitive?.content
+            }
+            assertEquals(expectedRooms, restored.rooms.map { it.roomRef to it.name }, name)
         }
     }
 }

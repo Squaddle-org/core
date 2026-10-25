@@ -34,6 +34,10 @@ import org.squaddle.core.ops.OpEnvelope
 import org.squaddle.core.ops.OpOpenResult
 import org.squaddle.core.ops.Snapshot
 import org.squaddle.core.ops.encode
+import org.squaddle.core.backup.Argon2Params
+import org.squaddle.core.backup.Backup
+import org.squaddle.core.backup.BackupContent
+import org.squaddle.core.backup.BackupRoomRef
 import org.squaddle.core.sync.RequestAuth
 import java.io.File
 import kotlin.io.encoding.Base64
@@ -60,6 +64,7 @@ public fun main(args: Array<String>) {
         writeJson(File(outDir, "snapshot.json"), snapshotVectors(crypto))
         writeJson(File(outDir, "op.json"), opVectors(crypto))
         writeJson(File(outDir, "request-auth.json"), requestAuthVectors(crypto))
+        writeJson(File(outDir, "backup.json"), backupVectors(crypto))
     }
 }
 
@@ -766,6 +771,67 @@ private fun requestAuthVectors(crypto: Crypto): JsonArray = buildJsonArray {
                 put("sig", sigB64)
                 put("header", header)
             }
+        }
+    }
+}
+
+// ---- backup.json : PROTOCOL.md §7 ----
+
+/** Deliberately tiny (test-only, never production): fast to generate/verify in CI, never meant to
+ * resist real attack. Fixed, not random, for reproducibility, same discipline as every other vector. */
+private val TEST_ARGON2_PARAMS = Argon2Params(opsLimit = 3L, memLimit = 8 * 1024)
+
+private fun backupVectors(crypto: Crypto): JsonArray = buildJsonArray {
+    val passphrase = "correct horse battery staple".encodeToByteArray()
+    val entropy = ByteArray(32) { (it + 210).toByte() }
+    val salt = ByteArray(16) { (it + 220).toByte() }
+    val nonce = ByteArray(24) { (it + 230).toByte() } // fixed: vectors must be reproducible, never crypto.randomBytes()
+    val content = BackupContent(
+        entropy = entropy,
+        rooms = listOf(BackupRoomRef("ABCDEFGHIJKLMNOP@relay.squaddle.org", "Board Game Night"), BackupRoomRef("QRSTUVWXYZ234567@relay.squaddle.org")),
+        createdAt = 1_700_000_000L,
+    )
+
+    val file = Backup.create(crypto, passphrase, content, TEST_ARGON2_PARAMS, salt, nonce)
+    val restored = Backup.restore(crypto, passphrase, file)
+    check(restored != null && restored.entropy.contentEquals(entropy)) { "generator bug: valid backup vector does not restore" }
+
+    addJsonObject {
+        put("name", "backup-basic")
+        putJsonObject("input") {
+            put("passphrase", passphrase.b64())
+            put("entropy", entropy.b64())
+            putJsonArray("rooms") {
+                content.rooms.forEach { room ->
+                    addJsonObject {
+                        put("roomRef", room.roomRef)
+                        room.name?.let { put("name", it) }
+                    }
+                }
+            }
+            put("createdAt", content.createdAt)
+            put("opsLimit", TEST_ARGON2_PARAMS.opsLimit)
+            put("memLimit", TEST_ARGON2_PARAMS.memLimit)
+            put("salt", salt.b64())
+            put("nonce", nonce.b64())
+        }
+        putJsonObject("expected") {
+            put("accept", true)
+            put("file", file.b64())
+        }
+    }
+
+    val tamperedFile = file.copyOf().also { it[it.size - 1] = it[it.size - 1].inc() }
+    check(Backup.restore(crypto, passphrase, tamperedFile) == null) { "generator bug: tampered backup vector still restores" }
+    addJsonObject {
+        put("name", "backup-reject-wrong-passphrase")
+        putJsonObject("input") {
+            put("file", file.b64())
+            put("passphrase", "wrong passphrase entirely".encodeToByteArray().b64())
+        }
+        putJsonObject("expected") {
+            put("accept", false)
+            put("reason", "AEAD authentication failed (or wrong passphrase)")
         }
     }
 }
