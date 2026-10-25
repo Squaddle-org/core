@@ -353,15 +353,16 @@ class TestVectorsVerificationTest {
             val method = input["method"]!!.jsonPrimitive.content
             val pathAndQuery = input["pathAndQuery"]!!.jsonPrimitive.content
             val ts = input["ts"]!!.jsonPrimitive.long
+            val nonce = b64(input["nonce"]!!.jsonPrimitive.content)
             val body = b64(input["body"]!!.jsonPrimitive.content)
             val device = b64(input["device"]!!.jsonPrimitive.content)
 
-            val signingInput = RequestAuth.signingInput(crypto, method, pathAndQuery, ts, body)
+            val signingInput = RequestAuth.signingInput(crypto, method, pathAndQuery, ts, nonce, body)
             assertContentEquals(b64(expected["signingInput"]!!.jsonPrimitive.content), signingInput, name)
 
             val sig = b64(expected["sig"]!!.jsonPrimitive.content)
             assertTrue(crypto.verify(device, signingInput, sig), name)
-            assertEquals(expected["header"]!!.jsonPrimitive.content, "SQDL1 device=${input["device"]!!.jsonPrimitive.content}, ts=$ts, sig=${expected["sig"]!!.jsonPrimitive.content}", name)
+            assertEquals(expected["header"]!!.jsonPrimitive.content, "SQDL1 device=${input["device"]!!.jsonPrimitive.content}, ts=$ts, nonce=${input["nonce"]!!.jsonPrimitive.content}, sig=${expected["sig"]!!.jsonPrimitive.content}", name)
         }
     }
 
