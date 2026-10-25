@@ -3,6 +3,7 @@
 package org.squaddle.core.sync
 
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
@@ -10,10 +11,13 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsBytes
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.websocket.Frame
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.crypto.KeyPair
+import org.squaddle.core.encoding.Base32
 import org.squaddle.core.encoding.CanonicalCborCodec
 import org.squaddle.core.encoding.CborFormatException
 import org.squaddle.core.encoding.CborValue
@@ -40,6 +44,14 @@ private data class RelayErrorBody(val code: String, val message: String, val hea
 
 @Serializable
 private data class AppendedBody(val index: Long, val rts: Long)
+
+/** PROTOCOL.md §6's shape, reused for `/ws` live push (relay-api.yaml: `{"r":"<b32 roomId>",
+ * "c":<cursor>,"k":"ops|log"}`). */
+@Serializable
+private data class WsEvent(val r: String, val c: Long, val k: String)
+
+@Serializable
+private data class WsSubscribe(val sub: List<String>)
 
 public sealed interface SyncOutcome {
     public data object Ok : SyncOutcome
@@ -469,6 +481,38 @@ public class SyncClient(
         val body = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
         return appendLogEntry(room) { index, prev ->
             LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.JOIN, body, nowUnixSeconds())
+        }
+    }
+
+    /**
+     * PROTOCOL.md §6: opens `/ws`, subscribes to [rooms], and calls [pull] on every push - a
+     * fresh [pull] naturally covers both log and ops regardless of which one [WsEvent.k] names
+     * (simpler than threading a "just this stream" fast path through pull() for an optimization
+     * the spec doesn't require). Suspends for as long as the connection stays open; returns
+     * normally on a clean server close, rethrows anything else (incl. cancellation, so a caller's
+     * coroutine scope can actually stop this). Callers wanting automatic reconnect should wrap
+     * this in their own retry loop - that policy is deliberately not baked in here.
+     */
+    public suspend fun connectLiveUpdates(rooms: List<ByteArray>) {
+        if (rooms.isEmpty()) return
+        val roomRefs = rooms.associateBy { Base32.encode(it) }
+        val ts = nowUnixSeconds()
+        val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, ByteArray(0))
+
+        httpClient.webSocket("wss://$relayHost${path("/ws")}", request = { header("Authorization", authHeader) }) {
+            send(Frame.Text(Json.encodeToString(WsSubscribe.serializer(), WsSubscribe(roomRefs.keys.toList()))))
+            for (frame in incoming) {
+                if (frame !is Frame.Text) continue
+                val event = try {
+                    Json.decodeFromString(WsEvent.serializer(), frame.data.decodeToString())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    continue
+                }
+                val room = roomRefs[event.r] ?: continue
+                pull(room)
+            }
         }
     }
 }
