@@ -85,17 +85,33 @@ public class SyncClient(
     private val device: KeyPair,
     private val deviceCert: DeviceCert,
     private val httpClient: HttpClient = createHttpClient(),
+    /** `false` only for a relay reached directly without a TLS-terminating reverse proxy in
+     * front (local dev/test runs against the relay binary itself, which only ever speaks plain
+     * HTTP - see relay/cmd/relay/main.go). Every real deployment terminates TLS upstream, so this
+     * defaults to `true`. */
+    private val tls: Boolean = true,
 ) {
-    // room.toKey() -> epoch -> epochKey. In-memory only - PROTOCOL.md never asks a client to
-    // persist epoch keys at rest beyond what EpochKeys.open can re-derive from the log itself, so
-    // a process restart just re-unwraps them from the already-pulled log on the next full replay.
+    private val httpScheme: String get() = if (tls) "https" else "http"
+    private val wsScheme: String get() = if (tls) "wss" else "ws"
+
+    // room.toKey() -> epoch -> epochKey. Pure in-memory cache over `store`'s own epoch_keys
+    // table (the real source of truth) - NOT every epoch key is re-derivable from the log alone:
+    // a member who joined via an open invite got theirs from the invite envelope, which leaves no
+    // trace in any log entry and typically stops existing once the invite is gone, so every key,
+    // however learned, is persisted on [registerEpochKey].
     private val epochKeys = mutableMapOf<String, MutableMap<Long, ByteArray>>()
 
     public fun registerEpochKey(room: ByteArray, epoch: Long, key: ByteArray) {
         epochKeys.getOrPut(room.toKey()) { mutableMapOf() }[epoch] = key
+        store.insertEpochKey(room, epoch, key)
     }
 
-    public fun epochKeyFor(room: ByteArray, epoch: Long): ByteArray? = epochKeys[room.toKey()]?.get(epoch)
+    public fun epochKeyFor(room: ByteArray, epoch: Long): ByteArray? {
+        epochKeys[room.toKey()]?.get(epoch)?.let { return it }
+        val persisted = store.epochKeyRowFor(room, epoch)?.key ?: return null
+        epochKeys.getOrPut(room.toKey()) { mutableMapOf() }[epoch] = persisted
+        return persisted
+    }
 
     private fun b64Url(bytes: ByteArray): String = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).encode(bytes)
 
@@ -104,7 +120,7 @@ public class SyncClient(
     private suspend fun authedRequest(method: HttpMethod, pathAndQuery: String, body: ByteArray = ByteArray(0)): HttpResponse {
         val ts = nowUnixSeconds()
         val header = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, method.value, pathAndQuery, ts, body)
-        return httpClient.request("https://$relayHost$pathAndQuery") {
+        return httpClient.request("$httpScheme://$relayHost$pathAndQuery") {
             this.method = method
             header("Authorization", header)
             if (method != HttpMethod.Get) {
@@ -131,6 +147,18 @@ public class SyncClient(
             state = state.apply(StoredEntry(entry, row.rts)).getOrElse { state }
         }
         return state
+    }
+
+    /** Re-derives this device's epoch keys from the room's already-locally-stored log, without
+     * touching the network. [epochKeys] is in-memory only (see its own doc comment) - a process
+     * restart needs this once per room before anything that decrypts ops, since [pull] only ever
+     * re-observes entries newer than the local cursor, not ones already on disk from a previous
+     * run. */
+    public fun rehydrateEpochKeys(room: ByteArray) {
+        for (row in store.logEntriesFrom(room, 0L)) {
+            val entry = LogEntry.decode(row.entry_cbor) ?: continue
+            observeEpochWraps(room, entry)
+        }
     }
 
     /** Unwraps any epoch key addressed to this device's user from a just-observed log entry:
@@ -194,9 +222,20 @@ public class SyncClient(
 
     /** Pulls new log entries + ops since the last saved cursor for [room]. */
     public suspend fun pull(room: ByteArray): SyncOutcome {
+        val logOutcome = pullLog(room)
+        if (logOutcome is SyncOutcome.Error) return logOutcome
+        return pullOps(room)
+    }
+
+    /** The log half of [pull] on its own - PROTOCOL.md §5 only gates ops/snapshots reads on
+     * membership ("Read access to ops/snapshots: device's user is member/admin/owner"), the log
+     * itself has no such restriction (relay's own `getLog` has no membership check, unlike
+     * `getOps`) - a brand-new joiner with no membership yet still needs to read the log to learn
+     * the current head before it can sign its own `join` entry's index/prev. [joinViaLink] uses
+     * this instead of the full [pull] for exactly that reason. */
+    public suspend fun pullLog(room: ByteArray): SyncOutcome {
         val existingCursor = store.cursorFor(room)
         val fromIndex = (existingCursor?.last_log_index ?: -1L) + 1
-        val afterCursor = existingCursor?.last_ops_cursor ?: 0L
 
         val logResp = authedRequest(HttpMethod.Get, path("/rooms/${b64Url(room)}/log?from=$fromIndex"))
         if (logResp.status != HttpStatusCode.OK) return errorOutcome(logResp)
@@ -207,6 +246,14 @@ public class SyncClient(
             if (entry.index > lastLogIndex) lastLogIndex = entry.index
             observeEpochWraps(room, entry)
         }
+        store.upsertCursor(room, lastLogIndex, existingCursor?.last_ops_cursor ?: 0L)
+        return SyncOutcome.Ok
+    }
+
+    /** The ops half of [pull] on its own - members only (§5), unlike [pullLog]. */
+    public suspend fun pullOps(room: ByteArray): SyncOutcome {
+        val existingCursor = store.cursorFor(room)
+        val afterCursor = existingCursor?.last_ops_cursor ?: 0L
 
         val opsResp = authedRequest(HttpMethod.Get, path("/rooms/${b64Url(room)}/ops?after=$afterCursor"))
         if (opsResp.status != HttpStatusCode.OK) return errorOutcome(opsResp)
@@ -216,8 +263,7 @@ public class SyncClient(
             store.insertOp(room, opCursor, env.opId(crypto), env.device, env.seq, envelopeCbor)
             store.upsertDeviceSeq(room, env.device, env.seq)
         }
-
-        store.upsertCursor(room, lastLogIndex, next)
+        store.upsertCursor(room, existingCursor?.last_log_index ?: -1L, next)
         return SyncOutcome.Ok
     }
 
@@ -486,13 +532,14 @@ public class SyncClient(
     }
 
     /** Fetches and opens an invite envelope (unauthenticated GET, per §3.5/relay-api.yaml), pulls
-     * the room's current log/ops (a brand-new joiner has no local history yet and must learn the
-     * real chain head before it can sign a `join` entry against the correct index/prev), then
-     * authors+pushes the `join` entry. [inviteSecret] is the bytes from the invite link's URL
-     * fragment - never logged, never sent anywhere itself (only used locally to derive
+     * the room's current log only (a brand-new joiner has no local history yet and must learn
+     * the real chain head before it can sign a `join` entry against the correct index/prev -
+     * [pullLog], not the full [pull]: `getOps` is members-only and this joiner isn't one yet),
+     * then authors+pushes the `join` entry. [inviteSecret] is the bytes from the invite link's
+     * URL fragment - never logged, never sent anywhere itself (only used locally to derive
      * `inviteKey` and decrypt). */
     public suspend fun joinViaLink(room: ByteArray, inviteId: ByteArray, inviteSecret: ByteArray): PushOutcome {
-        val resp = httpClient.request("https://$relayHost${path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope")}") {
+        val resp = httpClient.request("$httpScheme://$relayHost${path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope")}") {
             this.method = HttpMethod.Get
         }
         if (resp.status != HttpStatusCode.OK) {
@@ -503,7 +550,7 @@ public class SyncClient(
             ?: return PushOutcome.Error(resp.status.value, "invalid", "envelope did not decrypt")
         registerEpochKey(room, content.epoch, content.epochKey)
 
-        val pullOutcome = pull(room)
+        val pullOutcome = pullLog(room) // not the full pull(): getOps is members-only and this joiner isn't one yet
         if (pullOutcome is SyncOutcome.Error) return PushOutcome.Error(pullOutcome.status, pullOutcome.code, pullOutcome.message)
 
         val body = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
@@ -527,7 +574,7 @@ public class SyncClient(
         val ts = nowUnixSeconds()
         val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, ByteArray(0))
 
-        httpClient.webSocket("wss://$relayHost${path("/ws")}", request = { header("Authorization", authHeader) }) {
+        httpClient.webSocket("$wsScheme://$relayHost${path("/ws")}", request = { header("Authorization", authHeader) }) {
             send(Frame.Text(Json.encodeToString(WsSubscribe.serializer(), WsSubscribe(roomRefs.keys.toList()))))
             for (frame in incoming) {
                 if (frame !is Frame.Text) continue

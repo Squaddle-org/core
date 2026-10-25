@@ -109,8 +109,7 @@ SELECT MAX(local_order) FROM outbox WHERE room = ?;
 -- any server - but the admin device that MINTED the invite is the only place it ever existed, and
 -- §3.5 requires "Admins MUST re-upload envelopes of all active invites after every epochRotate",
 -- possibly long after the original creation, even across process restarts. There's nothing to
--- re-derive it from (unlike epoch keys, which can always be re-unwrapped from the log), so it has
--- to be persisted here.
+-- re-derive it from, so it has to be persisted here.
 CREATE TABLE invite_secrets (
   room      BLOB NOT NULL,
   invite_id BLOB NOT NULL,
@@ -126,3 +125,23 @@ SELECT * FROM invite_secrets WHERE room = ?;
 
 deleteInviteSecret:
 DELETE FROM invite_secrets WHERE room = ? AND invite_id = ?;
+
+-- Epoch keys CAN usually be re-unwrapped from the already-stored log (genesis's epoch0Wrapped,
+-- approve's wrappedEpochKey, epochRotate's per-user wrap array - see SyncClient.observeEpochWraps)
+-- - but a member who joined via an OPEN (no-approval) invite got their key from the invite
+-- envelope instead, which is never recorded in any log entry at all and typically stops existing
+-- once the invite is revoked/exhausted/rotated past. So every epoch key, however it was learned,
+-- has to be persisted the first time - there's no reliable way to treat "re-derivable from the
+-- log" as the only case.
+CREATE TABLE epoch_keys (
+  room  BLOB NOT NULL,
+  epoch INTEGER NOT NULL,
+  key   BLOB NOT NULL,
+  PRIMARY KEY (room, epoch)
+);
+
+insertEpochKey:
+INSERT OR REPLACE INTO epoch_keys (room, epoch, key) VALUES (?, ?, ?);
+
+epochKeyRowFor:
+SELECT * FROM epoch_keys WHERE room = ? AND epoch = ?;

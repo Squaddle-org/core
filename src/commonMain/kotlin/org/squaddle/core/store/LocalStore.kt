@@ -84,4 +84,10 @@ public class LocalStore(driver: SqlDriver) {
     public fun deleteInviteSecret(room: ByteArray, inviteId: ByteArray) {
         q.deleteInviteSecret(room, inviteId)
     }
+
+    public fun insertEpochKey(room: ByteArray, epoch: Long, key: ByteArray) {
+        q.insertEpochKey(room, epoch, key)
+    }
+
+    public fun epochKeyRowFor(room: ByteArray, epoch: Long): Epoch_keys? = q.epochKeyRowFor(room, epoch).executeAsOneOrNull()
 }
