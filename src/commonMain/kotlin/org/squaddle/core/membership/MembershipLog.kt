@@ -30,6 +30,40 @@ public data class LogEntry(
     public companion object {
         public const val DOMAIN: String = "logentry"
 
+        /** Decodes a full (0..9, incl. [sig]) CBOR-encoded LogEntry as received from the wire
+         * (`GET /rooms/{room}/log`). `null` on malformed CBOR or a field-shape mismatch - never
+         * throws; does NOT verify the signature/cert, call [verify] for that. Mirrors relay's own
+         * `DecodeLogEntry`. */
+        public fun decode(bytes: ByteArray): LogEntry? {
+            val map = try {
+                (CanonicalCborCodec.decode(bytes) as? CborValue.Map)?.entries ?: return null
+            } catch (e: org.squaddle.core.encoding.CborFormatException) {
+                return null
+            }
+            return try {
+                val certBytes = CanonicalCborCodec.encode(map.getValue(5L))
+                val cert = DeviceCert.decode(certBytes) ?: return null
+                val typeCode = (map.getValue(6L) as CborValue.UInt).value.toInt()
+                val type = EntryType.entries.firstOrNull { it.code == typeCode } ?: return null
+                LogEntry(
+                    v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+                    room = (map.getValue(1L) as CborValue.Bytes).value,
+                    index = (map.getValue(2L) as CborValue.UInt).value,
+                    prev = (map[3L] as? CborValue.Bytes)?.value,
+                    author = (map.getValue(4L) as CborValue.Bytes).value,
+                    cert = cert,
+                    type = type,
+                    body = map.getValue(7L) as CborValue.Map,
+                    ts = (map.getValue(8L) as CborValue.UInt).value,
+                    sig = (map[9L] as? CborValue.Bytes)?.value,
+                )
+            } catch (e: NoSuchElementException) {
+                null
+            } catch (e: ClassCastException) {
+                null
+            }
+        }
+
         /** Builds and signs a v1 LogEntry with [deviceSecretKey] (the author device's Ed25519 key). */
         public fun sign(
             crypto: Crypto,

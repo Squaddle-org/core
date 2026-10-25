@@ -19,6 +19,33 @@ public data class DeviceCert(
         public const val DOMAIN: String = "devcert"
         public const val MAX_LABEL_LENGTH: Int = 64
 
+        /** Decodes a full (0..6, incl. [sig]) CBOR-encoded DeviceCert as received from the wire
+         * (e.g. embedded in a `LogEntry`, or fetched via `/users/{u}/devices`). `null` on
+         * malformed CBOR or a field-shape mismatch - never throws; does NOT verify the signature,
+         * call [verify] for that. Mirrors relay's own `DecodeDeviceCert`. */
+        public fun decode(bytes: ByteArray): DeviceCert? {
+            val map = try {
+                (CanonicalCborCodec.decode(bytes) as? CborValue.Map)?.entries ?: return null
+            } catch (e: org.squaddle.core.encoding.CborFormatException) {
+                return null
+            }
+            return try {
+                DeviceCert(
+                    v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+                    user = (map.getValue(1L) as CborValue.Bytes).value,
+                    userBox = (map.getValue(2L) as CborValue.Bytes).value,
+                    device = (map.getValue(3L) as CborValue.Bytes).value,
+                    label = (map.getValue(4L) as CborValue.Text).value,
+                    issuedAt = (map.getValue(5L) as CborValue.UInt).value,
+                    sig = (map[6L] as? CborValue.Bytes)?.value,
+                )
+            } catch (e: NoSuchElementException) {
+                null
+            } catch (e: ClassCastException) {
+                null
+            }
+        }
+
         /** Builds and signs a v1 DeviceCert with [userSecretKey] (the user's Ed25519 signing key). */
         public fun sign(
             crypto: Crypto,

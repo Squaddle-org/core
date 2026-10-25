@@ -143,4 +143,20 @@ class LogEntryTest {
         assertTrue(second.verify(crypto))
         assertContentEquals(genesis.entryHash(crypto), second.prev!!)
     }
+
+    @Test
+    fun decodeRoundTripsAWireEncodedEntry() = runTest {
+        val crypto = crypto()
+        val a = actor(crypto)
+        val room = crypto.randomBytes(32)
+        val original = entry(crypto, a, room)
+        val decoded = LogEntry.decode(CanonicalCborCodec.encode(original.toFullCbor()))!!
+        assertTrue(decoded.verify(crypto))
+        assertContentEquals(original.entryHash(crypto), decoded.entryHash(crypto))
+    }
+
+    @Test
+    fun decodeReturnsNullOnMalformedCbor() {
+        kotlin.test.assertEquals(null, LogEntry.decode(byteArrayOf(0xff.toByte())))
+    }
 }

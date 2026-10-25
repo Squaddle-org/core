@@ -25,6 +25,36 @@ public data class OpEnvelope(
     public companion object {
         public const val DOMAIN: String = "op"
 
+        /** Decodes a full (0..9, incl. [sig]) CBOR-encoded OpEnvelope as received from the wire
+         * (`GET /rooms/{room}/ops`). `null` on malformed CBOR or a field-shape mismatch - never
+         * throws; does NOT verify/open, use [verify]/[open] for that. Mirrors relay's own
+         * `DecodeOpEnvelope`. */
+        public fun decode(bytes: ByteArray): OpEnvelope? {
+            val map = try {
+                (CanonicalCborCodec.decode(bytes) as? CborValue.Map)?.entries ?: return null
+            } catch (e: org.squaddle.core.encoding.CborFormatException) {
+                return null
+            }
+            return try {
+                OpEnvelope(
+                    v = (map.getValue(0L) as CborValue.UInt).value.toInt(),
+                    room = (map.getValue(1L) as CborValue.Bytes).value,
+                    epoch = (map.getValue(2L) as CborValue.UInt).value,
+                    author = (map.getValue(3L) as CborValue.Bytes).value,
+                    device = (map.getValue(4L) as CborValue.Bytes).value,
+                    seq = (map.getValue(5L) as CborValue.UInt).value,
+                    lamport = (map.getValue(6L) as CborValue.UInt).value,
+                    nonce = (map.getValue(7L) as CborValue.Bytes).value,
+                    ct = (map.getValue(8L) as CborValue.Bytes).value,
+                    sig = (map[9L] as? CborValue.Bytes)?.value,
+                )
+            } catch (e: NoSuchElementException) {
+                null
+            } catch (e: ClassCastException) {
+                null
+            }
+        }
+
         /** Builds, encrypts and signs a v1 OpEnvelope: [body]'s plaintext CBOR becomes [ct] under
          * `AEAD(epochKey, nonce, CBOR(body), ad = toAdCbor())`. */
         public fun create(

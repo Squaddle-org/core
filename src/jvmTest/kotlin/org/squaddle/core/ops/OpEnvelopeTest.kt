@@ -167,6 +167,22 @@ class OpEnvelopeTest {
     }
 
     @Test
+    fun decodeRoundTripsAWireEncodedEnvelope() = runTest {
+        val crypto = crypto()
+        val a = actor(crypto, "Phone")
+        val epochKey = crypto.randomBytes(32)
+        val op = validOp(crypto, a, epochKey, crypto.randomBytes(32))
+        val decoded = OpEnvelope.decode(CanonicalCborCodec.encode(op.toFullCbor()))!!
+        assertTrue(decoded.verify(crypto))
+        assertEquals(op.opId(crypto).toList(), decoded.opId(crypto).toList())
+    }
+
+    @Test
+    fun decodeReturnsNullOnMalformedCbor() {
+        assertEquals(null, OpEnvelope.decode(byteArrayOf(0xff.toByte())))
+    }
+
+    @Test
     fun opIdIsStableForIdenticalEnvelopes() = runTest {
         val crypto = crypto()
         val a = actor(crypto, "Phone")

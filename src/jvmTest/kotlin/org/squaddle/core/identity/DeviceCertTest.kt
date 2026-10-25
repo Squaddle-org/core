@@ -6,6 +6,8 @@ import org.squaddle.core.crypto.LibsodiumCrypto
 import org.squaddle.core.crypto.signingInput
 import org.squaddle.core.encoding.CanonicalCborCodec
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -131,5 +133,20 @@ class DeviceCertTest {
         val impostor = UserIdentity.create(crypto)
         val forgedSig = crypto.sign(impostor.signing.secretKey, crypto.signingInput(DeviceCert.DOMAIN, CanonicalCborCodec.encode(cert.toUnsignedCbor())))
         assertFalse(cert.copy(sig = forgedSig).verify(crypto))
+    }
+
+    @Test
+    fun decodeRoundTripsAWireEncodedCert() = runTest {
+        val crypto = crypto()
+        val (cert, _) = validCert(crypto)
+        val decoded = DeviceCert.decode(CanonicalCborCodec.encode(cert.toFullCbor()))!!
+        assertTrue(decoded.verify(crypto))
+        assertContentEquals(cert.user, decoded.user)
+        assertEquals(cert.label, decoded.label)
+    }
+
+    @Test
+    fun decodeReturnsNullOnMalformedCbor() {
+        assertEquals(null, DeviceCert.decode(byteArrayOf(0xff.toByte())))
     }
 }
