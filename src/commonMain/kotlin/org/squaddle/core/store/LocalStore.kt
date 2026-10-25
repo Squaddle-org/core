@@ -74,4 +74,14 @@ public class LocalStore(driver: SqlDriver) {
     }
 
     public fun maxOutboxLocalOrder(room: ByteArray): Long? = q.maxOutboxLocalOrder(room).executeAsOne().MAX
+
+    public fun insertInviteSecret(room: ByteArray, inviteId: ByteArray, secret: ByteArray) {
+        q.insertInviteSecret(room, inviteId, secret)
+    }
+
+    public fun inviteSecretsFor(room: ByteArray): List<Invite_secrets> = q.inviteSecretsFor(room).executeAsList()
+
+    public fun deleteInviteSecret(room: ByteArray, inviteId: ByteArray) {
+        q.deleteInviteSecret(room, inviteId)
+    }
 }

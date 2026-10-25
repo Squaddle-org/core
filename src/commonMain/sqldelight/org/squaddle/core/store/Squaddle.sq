@@ -104,3 +104,25 @@ DELETE FROM outbox WHERE room = ? AND local_order = ?;
 
 maxOutboxLocalOrder:
 SELECT MAX(local_order) FROM outbox WHERE room = ?;
+
+-- PROTOCOL.md §3.5: the inviteSecret lives only in the share link's URL fragment, never sent to
+-- any server - but the admin device that MINTED the invite is the only place it ever existed, and
+-- §3.5 requires "Admins MUST re-upload envelopes of all active invites after every epochRotate",
+-- possibly long after the original creation, even across process restarts. There's nothing to
+-- re-derive it from (unlike epoch keys, which can always be re-unwrapped from the log), so it has
+-- to be persisted here.
+CREATE TABLE invite_secrets (
+  room      BLOB NOT NULL,
+  invite_id BLOB NOT NULL,
+  secret    BLOB NOT NULL,
+  PRIMARY KEY (room, invite_id)
+);
+
+insertInviteSecret:
+INSERT OR REPLACE INTO invite_secrets (room, invite_id, secret) VALUES (?, ?, ?);
+
+inviteSecretsFor:
+SELECT * FROM invite_secrets WHERE room = ?;
+
+deleteInviteSecret:
+DELETE FROM invite_secrets WHERE room = ? AND invite_id = ?;

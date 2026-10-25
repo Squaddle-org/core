@@ -21,9 +21,11 @@ import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
 import org.squaddle.core.membership.EntryType
 import org.squaddle.core.membership.EpochKeys
+import org.squaddle.core.membership.InviteEnvelope
 import org.squaddle.core.membership.LogEntry
 import org.squaddle.core.membership.MembershipState
 import org.squaddle.core.membership.MembershipStateImpl
+import org.squaddle.core.membership.Role
 import org.squaddle.core.membership.StoredEntry
 import org.squaddle.core.ops.OpBody
 import org.squaddle.core.ops.OpEnvelope
@@ -284,11 +286,15 @@ public class SyncClient(
         return true
     }
 
-    /** Pushes every outstanding outbox op for [room] as one batch. On `409 stale_epoch`:
-     * re-encrypts the outbox under the new epoch key (unwrapped via a fresh [pull]) and retries
-     * once. `rotation_required` handling (auto-rotate for admin/owner, wait otherwise) is a
-     * separate concern layered on top of this - see the room-session helpers. */
-    public suspend fun push(room: ByteArray, allowStaleEpochRetry: Boolean = true): PushOutcome {
+    /** Pushes every outstanding outbox op for [room] as one batch.
+     * - `409 stale_epoch`: re-encrypts the outbox under the new epoch key (unwrapped via a fresh
+     *   [pull]) and retries once.
+     * - `409 rotation_required` (ADR-0012): if this device's user currently holds owner/admin,
+     *   authors+pushes the missing `epochRotate` itself (§3.4: "Clients MUST rotate automatically
+     *   when they author a remove" - generalized here to "whichever admin/owner notices first",
+     *   since any of them may clear `rotationPending`) and retries; otherwise returns
+     *   [PushOutcome.WaitingForRotation] - the caller should simply [pull] again later. */
+    public suspend fun push(room: ByteArray, allowRetry: Boolean = true): PushOutcome {
         val pending = store.outboxFor(room)
         if (pending.isEmpty()) return PushOutcome.Ok
 
@@ -300,10 +306,169 @@ public class SyncClient(
         }
 
         val err = parseError(resp.bodyAsBytes()) ?: return PushOutcome.Error(resp.status.value, "invalid", "unparseable error body")
-        if (err.code == "stale_epoch" && allowStaleEpochRetry) {
-            pull(room) // picks up the epochRotate entry and unwraps the new key
-            if (reencryptOutboxForNewEpoch(room)) return push(room, allowStaleEpochRetry = false)
+        if (!allowRetry) return PushOutcome.Error(resp.status.value, err.code, err.message)
+
+        when (err.code) {
+            "stale_epoch" -> {
+                pull(room) // picks up the epochRotate entry and unwraps the new key
+                if (reencryptOutboxForNewEpoch(room)) return push(room, allowRetry = false)
+            }
+            "rotation_required" -> {
+                val role = replayMembershipState(room).roleOf(userIdentity.userKey)
+                if (role == Role.OWNER || role == Role.ADMIN) {
+                    val rotateOutcome = autoRotate(room)
+                    if (rotateOutcome == PushOutcome.Ok) {
+                        // autoRotate just moved the room to a new epoch - every still-queued op
+                        // was encrypted under the old one and would otherwise immediately bounce
+                        // off a (correct) stale_epoch on the retry.
+                        reencryptOutboxForNewEpoch(room)
+                        return push(room, allowRetry = false)
+                    }
+                    return rotateOutcome
+                }
+                return PushOutcome.WaitingForRotation
+            }
         }
         return PushOutcome.Error(resp.status.value, err.code, err.message)
+    }
+
+    /** Collects each current member's `userBoxKey` from the DeviceCert embedded in their most
+     * recent authored log entry (every cert carries the author's actual per-user box key, not a
+     * per-device one, per §2.1/§2.2). */
+    private fun collectUserBoxKeys(room: ByteArray): Map<String, ByteArray> {
+        val map = mutableMapOf<String, ByteArray>()
+        for (row in store.logEntriesFrom(room, 0L)) {
+            val entry = LogEntry.decode(row.entry_cbor) ?: continue
+            map[entry.author.toKey()] = entry.cert.userBox
+        }
+        return map
+    }
+
+    /** Authors and pushes an `epochRotate` entry wrapping a fresh epoch key for every current
+     * non-pending member (§3.3 row 10), then re-uploads every active open invite's envelope under
+     * the new key (§3.5: "Admins MUST re-upload envelopes of all active invites after every
+     * epochRotate"). Caller must already hold owner/admin - [push] checks this before calling. */
+    public suspend fun autoRotate(room: ByteArray): PushOutcome {
+        val state = replayMembershipState(room)
+        val newEpoch = state.epoch + 1
+        val newKey = crypto.randomBytes(32)
+        val userBoxKeys = collectUserBoxKeys(room)
+        val nonPending = state.members().filter { it.role != Role.PENDING }
+
+        val wraps = nonPending.mapNotNull { member ->
+            val userBox = userBoxKeys[member.user.toKey()] ?: return@mapNotNull null
+            val sealed = EpochKeys.seal(crypto, userBox, room, newEpoch, newKey)
+            CborValue.Map(mapOf(0L to CborValue.Bytes(member.user), 1L to CborValue.Bytes(sealed)))
+        }
+        if (wraps.size != nonPending.size) {
+            return PushOutcome.Error(500, "invalid", "missing a userBoxKey for a current member - cannot build epochRotate")
+        }
+
+        val body = CborValue.Map(mapOf(0L to CborValue.UInt(newEpoch), 1L to CborValue.Array(wraps)))
+        val outcome = appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.EPOCH_ROTATE, body, nowUnixSeconds())
+        }
+        if (outcome != PushOutcome.Ok) return outcome
+
+        registerEpochKey(room, newEpoch, newKey)
+        reuploadEnvelopesAfterRotation(room, newEpoch, newKey)
+        return PushOutcome.Ok
+    }
+
+    /** §3.5: re-seals every locally-known invite secret under [newEpoch]/[newKey] and PUTs the
+     * refreshed envelope. Silently skips invites this device never created (no secret stored) or
+     * that are no longer active (revoked/not an open invite) - another admin device, or this
+     * device on a later pull, will have its own chance. */
+    private suspend fun reuploadEnvelopesAfterRotation(room: ByteArray, newEpoch: Long, newKey: ByteArray) {
+        val activeOpenInviteIds = replayMembershipState(room).invites()
+            .filter { !it.revoked && !it.requiresApproval }
+            .map { it.id.toKey() }
+            .toSet()
+        for (row in store.inviteSecretsFor(room)) {
+            if (row.invite_id.toKey() !in activeOpenInviteIds) continue
+            val envelope = InviteEnvelope.seal(crypto, row.secret, room, row.invite_id, newEpoch, newKey)
+            authedRequest(HttpMethod.Put, path("/invites/${b64Url(room)}/${b64Url(row.invite_id)}/envelope"), envelope)
+        }
+    }
+
+    /** Authors an `inviteCreate` entry and, for open (no-approval) invites, mints a fresh
+     * [org.squaddle.core.membership.InviteEnvelope] and uploads it - the join flow's other half,
+     * [joinViaLink]. The secret is persisted locally (§3.5's re-upload-after-rotation needs it
+     * later; nothing else can ever recover it). */
+    public suspend fun createInvite(
+        room: ByteArray,
+        inviteId: ByteArray,
+        requiresApproval: Boolean,
+        expiresAt: Long? = null,
+        maxUses: Int? = null,
+        roomName: String? = null,
+    ): PushOutcome {
+        val body = CborValue.Map(
+            buildMap {
+                put(0L, CborValue.Bytes(inviteId))
+                expiresAt?.let { put(1L, CborValue.UInt(it)) }
+                maxUses?.let { put(2L, CborValue.UInt(it.toLong())) }
+                put(3L, CborValue.Bool(requiresApproval))
+                put(4L, CborValue.Text("member"))
+            },
+        )
+        val outcome = appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.INVITE_CREATE, body, nowUnixSeconds())
+        }
+        if (outcome != PushOutcome.Ok || requiresApproval) return outcome
+
+        val epoch = replayMembershipState(room).epoch
+        val key = epochKeyFor(room, epoch) ?: return PushOutcome.Error(500, "invalid", "epoch key not available to seal the invite envelope")
+        val secret = crypto.randomBytes(32)
+        store.insertInviteSecret(room, inviteId, secret)
+        val envelope = InviteEnvelope.seal(crypto, secret, room, inviteId, epoch, key, roomName)
+        val resp = authedRequest(HttpMethod.Put, path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope"), envelope)
+        if (resp.status != HttpStatusCode.NoContent && resp.status != HttpStatusCode.OK) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "envelope upload failed")
+        }
+        return PushOutcome.Ok
+    }
+
+    /** Registers this device's own [deviceCert] with the relay (`PUT /users/{u}/devices/{d}`) -
+     * needed before anyone else can resolve "does this device belong to this author" for this
+     * device's future log entries/ops (§2.2/§4.1's documented relay-side limitation). Unlike
+     * every other write, this request is self-certifying even for a device the relay has never
+     * seen (same as request-auth itself), so it's always safe to call first. */
+    public suspend fun publishDeviceCert(): PushOutcome {
+        val body = CanonicalCborCodec.encode(deviceCert.toFullCbor())
+        val resp = authedRequest(HttpMethod.Put, path("/users/${b64Url(userIdentity.userKey)}/devices/${b64Url(device.publicKey)}"), body)
+        if (resp.status != HttpStatusCode.NoContent) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "device cert publish failed")
+        }
+        return PushOutcome.Ok
+    }
+
+    /** Fetches and opens an invite envelope (unauthenticated GET, per §3.5/relay-api.yaml), pulls
+     * the room's current log/ops (a brand-new joiner has no local history yet and must learn the
+     * real chain head before it can sign a `join` entry against the correct index/prev), then
+     * authors+pushes the `join` entry. [inviteSecret] is the bytes from the invite link's URL
+     * fragment - never logged, never sent anywhere itself (only used locally to derive
+     * `inviteKey` and decrypt). */
+    public suspend fun joinViaLink(room: ByteArray, inviteId: ByteArray, inviteSecret: ByteArray): PushOutcome {
+        val resp = httpClient.request("https://$relayHost${path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope")}") {
+            this.method = HttpMethod.Get
+        }
+        if (resp.status != HttpStatusCode.OK) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "envelope fetch failed")
+        }
+        val content = InviteEnvelope.open(crypto, inviteSecret, room, inviteId, resp.bodyAsBytes())
+            ?: return PushOutcome.Error(resp.status.value, "invalid", "envelope did not decrypt")
+        registerEpochKey(room, content.epoch, content.epochKey)
+
+        val pullOutcome = pull(room)
+        if (pullOutcome is SyncOutcome.Error) return PushOutcome.Error(pullOutcome.status, pullOutcome.code, pullOutcome.message)
+
+        val body = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
+        return appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.JOIN, body, nowUnixSeconds())
+        }
     }
 }
