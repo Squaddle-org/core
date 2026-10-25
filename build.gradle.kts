@@ -46,12 +46,15 @@ kotlin {
         }
         jvmMain.dependencies {
             implementation(libs.sqldelight.driver.sqlite)
+            implementation(libs.ktor.client.okhttp)
         }
         jvmTest.dependencies {
             implementation(libs.kotest.property)
+            implementation(libs.ktor.client.mock)
         }
         getByName("androidMain").dependencies {
             implementation(libs.sqldelight.driver.android)
+            implementation(libs.ktor.client.okhttp)
         }
         getByName("androidHostTest").dependencies {
             implementation(kotlin("test"))
