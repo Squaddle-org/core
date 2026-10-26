@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 /** RFC 8949 §4.2.1 round-trip + reject tests for [CanonicalCborCodec]. */
 class CanonicalCborTest {
 
-    private fun hex(bytes: ByteArray): String = bytes.joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }
+    private fun hex(bytes: ByteArray): String = bytes.joinToString(" ") { Hex.encode(byteArrayOf(it)) }
 
     @Test
     fun uintShortestFormAtEachBoundary() {

@@ -1,12 +1,13 @@
 package org.squaddle.core.ops
 
+import org.squaddle.core.encoding.Hex
 import org.squaddle.core.membership.MembershipState
 import org.squaddle.core.membership.Role
 import org.squaddle.core.membership.StoredEntry
 
 /** Hashable form of a ByteArray key - raw `ByteArray` has reference equality/hashCode, which
  * breaks `Map`/`Set` usage (the same gotcha `LwwStamp`'s `compareTo` already works around). */
-private fun ByteArray.toKey(): String = joinToString("") { "%02x".format(it) }
+private fun ByteArray.toKey(): String = Hex.encode(this)
 
 private fun Role?.isActiveMember(): Boolean = this != null && this != Role.PENDING
 private fun Role?.isAdminOrOwner(): Boolean = this == Role.ADMIN || this == Role.OWNER

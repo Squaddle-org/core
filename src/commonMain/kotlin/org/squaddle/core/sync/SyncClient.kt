@@ -22,6 +22,7 @@ import org.squaddle.core.encoding.Base32
 import org.squaddle.core.encoding.CanonicalCborCodec
 import org.squaddle.core.encoding.CborFormatException
 import org.squaddle.core.encoding.CborValue
+import org.squaddle.core.encoding.Hex
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
 import org.squaddle.core.membership.EntryType
@@ -82,7 +83,7 @@ public sealed interface PushOutcome {
     public data class Error(val status: Int, val code: String, val message: String) : PushOutcome
 }
 
-private fun ByteArray.toKey(): String = joinToString("") { "%02x".format(it) }
+private fun ByteArray.toKey(): String = Hex.encode(this)
 
 /**
  * PROTOCOL.md §4/§5 sync client: pulls the membership log + op-log into [store], decrypts+tracks

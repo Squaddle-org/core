@@ -4,6 +4,7 @@ import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.encoding.CanonicalCborCodec
 import org.squaddle.core.encoding.CborFormatException
 import org.squaddle.core.encoding.CborValue
+import org.squaddle.core.encoding.Hex
 
 /**
  * PROTOCOL.md §4.4 names a Snapshot's `ct` plaintext as "materialized state + seq vector" without
@@ -179,7 +180,7 @@ public fun decodeSnapshotPayload(bytes: ByteArray): SnapshotPayload? {
     }
 }
 
-private fun ByteArray.toSnapshotKey(): String = joinToString("") { "%02x".format(it) }
+private fun ByteArray.toSnapshotKey(): String = Hex.encode(this)
 
 /** Encrypts [payload] under [epochKey] and signs the result - the client-side half of §4.4's
  * "relay never decrypts ct"; the relay only ever sees the already-sealed [Snapshot]. */

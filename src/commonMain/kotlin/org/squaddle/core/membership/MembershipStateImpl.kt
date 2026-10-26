@@ -2,6 +2,7 @@ package org.squaddle.core.membership
 
 import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.encoding.CborValue
+import org.squaddle.core.encoding.Hex
 
 /**
  * Pure state machine for PROTOCOL.md §3.3. Every `apply()` returns a brand new
@@ -243,22 +244,9 @@ public class MembershipStateImpl private constructor(
     private fun reject(reason: RejectReason): Result<MembershipState> = Result.failure(MembershipRejectException(reason))
 }
 
-private const val HEX_CHARS = "0123456789abcdef"
+private fun ByteArray.hex(): String = Hex.encode(this)
 
-/** `String.format("%02x", ...)` is JVM-only; this stays multiplatform-safe for commonMain. */
-private fun ByteArray.hex(): String {
-    val sb = StringBuilder(size * 2)
-    for (b in this) {
-        val v = b.toInt() and 0xFF
-        sb.append(HEX_CHARS[v ushr 4])
-        sb.append(HEX_CHARS[v and 0x0F])
-    }
-    return sb.toString()
-}
-
-private fun String.unhex(): ByteArray = ByteArray(length / 2) { i ->
-    (HEX_CHARS.indexOf(this[i * 2]).shl(4) or HEX_CHARS.indexOf(this[i * 2 + 1])).toByte()
-}
+private fun String.unhex(): ByteArray = Hex.decode(this)
 
 private fun Map<Long, CborValue>.bytesOrNull(key: Long): ByteArray? = (this[key] as? CborValue.Bytes)?.value
 private fun Map<Long, CborValue>.uintOrNull(key: Long): Long? = (this[key] as? CborValue.UInt)?.value
