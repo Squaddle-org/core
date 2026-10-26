@@ -82,6 +82,10 @@ kotlin {
         }
         getByName("jsMain").dependencies {
             implementation(libs.ktor.client.js)
+            // No official SqlDelight sync browser driver exists (ADR-0009) - SqlJsDriver.kt
+            // hand-wraps this directly, synchronously, matching jvm/android's generated
+            // (non-async) SquaddleDb query API.
+            implementation(npm("sql.js", "1.15.2"))
         }
         getByName("jsTest").dependencies {
             implementation(kotlin("test"))
