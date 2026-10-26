@@ -28,7 +28,21 @@ kotlin {
             instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         }
     }
-    // M5: js(IR) { browser() } / wasmJs { browser() } — only after verifying libsodium bindings support it
+    // M5/ADR-0009: js(IR), not wasmJs - no official wasmJs variant exists for the pinned crypto
+    // library (confirmed: ADR-0009). The crypto bridge's own broken npm import also needed a
+    // fix - see webpack.config.d/ and ADR-0009's "crypto bridge" note. Runtime correctness
+    // against a real browser is still unverified (ADR-0009's one open item).
+    js {
+        browser {
+            testTask {
+                useKarma {
+                    useChromiumHeadless()
+                }
+            }
+        }
+        binaries.library()
+        useEsModules()
+    }
     // M6: iosArm64(); iosSimulatorArm64()
 
     sourceSets {
@@ -64,6 +78,13 @@ kotlin {
             implementation(libs.coroutines.test)
             implementation(libs.androidx.test.runner)
             implementation(libs.androidx.test.ext.junit)
+        }
+        getByName("jsMain").dependencies {
+            implementation(libs.ktor.client.js)
+        }
+        getByName("jsTest").dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.coroutines.test)
         }
     }
 }
