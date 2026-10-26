@@ -618,7 +618,11 @@ public class SyncClient(
      */
     public suspend fun connectLiveUpdates(rooms: List<ByteArray>) {
         if (rooms.isEmpty()) return
-        val roomRefs = rooms.associateBy { Base32.encode(it) }
+        // lowercase: relay's own `roomRefBase32` (push.go) lowercases before echoing a room ref
+        // back in `WsEvent.r` - keying this map with `Base32.encode`'s uppercase output would
+        // make every lookup below miss silently (`?: continue`), so no push would ever trigger
+        // a pull.
+        val roomRefs = rooms.associateBy { Base32.encode(it).lowercase() }
         val ts = nowUnixSeconds()
         val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, crypto.randomBytes(16), ByteArray(0))
 
