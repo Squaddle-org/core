@@ -459,4 +459,50 @@ class SyncClientTest {
         assertEquals(0, store.outboxFor(room).size)
         assertTrue(sync.epochKeyFor(room, 1L) != null) // owner registered its own newly-minted key
     }
+
+    @Test
+    fun listMyRoomsDecodesTheRoomListOnSuccess() = runTest {
+        val crypto = crypto()
+        val owner = UserIdentity.create(crypto)
+        val device = crypto.signSeedKeypair(crypto.randomBytes(32))
+        val cert = DeviceCert.sign(crypto, owner.signing.secretKey, owner.userKey, owner.userBoxKey, device.publicKey, "Phone", 1L)
+        val roomNonce = crypto.randomBytes(16)
+        val room = roomId(crypto, owner.userKey, roomNonce)
+        val roomB64 = kotlin.io.encoding.Base64.UrlSafe.withPadding(kotlin.io.encoding.Base64.PaddingOption.ABSENT).encode(room)
+
+        val mockEngine = MockEngine { request ->
+            assertTrue(request.url.encodedPath.endsWith("/rooms"))
+            respond(
+                """[{"roomId":"$roomB64","relayHost":"relay.squaddle.org"}]""".encodeToByteArray(),
+                HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val store = LocalStore(createSqlDriver(":memory:"))
+        val sync = SyncClient(crypto, store, "relay.example.org", owner, device, cert, HttpClient(mockEngine))
+
+        val outcome = sync.listMyRooms()
+        val ok = outcome as ListRoomsOutcome.Ok
+        assertEquals(1, ok.rooms.size)
+        assertEquals(room.toList(), ok.rooms.single().roomId.toList())
+        assertEquals("relay.squaddle.org", ok.rooms.single().relayHost)
+    }
+
+    @Test
+    fun listMyRoomsSurfacesANon200AsError() = runTest {
+        val crypto = crypto()
+        val owner = UserIdentity.create(crypto)
+        val device = crypto.signSeedKeypair(crypto.randomBytes(32))
+        val cert = DeviceCert.sign(crypto, owner.signing.secretKey, owner.userKey, owner.userBoxKey, device.publicKey, "Phone", 1L)
+
+        val mockEngine = MockEngine { _ ->
+            respond(errorBody("forbidden"), HttpStatusCode.Forbidden, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val store = LocalStore(createSqlDriver(":memory:"))
+        val sync = SyncClient(crypto, store, "relay.example.org", owner, device, cert, HttpClient(mockEngine))
+
+        val outcome = sync.listMyRooms()
+        val err = outcome as ListRoomsOutcome.Error
+        assertEquals(403, err.status)
+        assertEquals("forbidden", err.code)
+    }
 }
