@@ -566,6 +566,19 @@ public class SyncClient(
         return ListRoomsOutcome.Ok(items.map { RemoteRoomRef(b64UrlDecode(it.roomId), it.relayHost) })
     }
 
+    /** Fetches and opens an invite envelope read-only - no pull, no join entry - so a join
+     * screen can preview the room name before the user commits. `null` on any failure (HTTP
+     * error, missing envelope, or decrypt failure) - never throws. Approval-required invites
+     * have no envelope to peek (§3.5: "no envelope exists" for those); callers should skip this
+     * when there's no secret to pass. */
+    public suspend fun peekInviteRoomName(room: ByteArray, inviteId: ByteArray, inviteSecret: ByteArray): String? {
+        val resp = httpClient.request("$httpScheme://$relayHost${path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope")}") {
+            this.method = HttpMethod.Get
+        }
+        if (resp.status != HttpStatusCode.OK) return null
+        return InviteEnvelope.open(crypto, inviteSecret, room, inviteId, resp.bodyAsBytes())?.roomName
+    }
+
     /** Fetches and opens an invite envelope (unauthenticated GET, per §3.5/relay-api.yaml), pulls
      * the room's current log only (a brand-new joiner has no local history yet and must learn
      * the real chain head before it can sign a `join` entry against the correct index/prev -
