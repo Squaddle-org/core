@@ -42,6 +42,7 @@ kotlin {
         }
         binaries.library()
         useEsModules()
+        generateTypeScriptDefinitions()
     }
     // M6: iosArm64(); iosSimulatorArm64()
 
