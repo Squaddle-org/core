@@ -11,3 +11,5 @@ jobs:
       - run: ./gradlew jvmTest
       - uses: android-actions/setup-android@v4
       - run: ./gradlew compileAndroidMain testAndroidHostTest
+      # ubuntu-latest ships Chrome preinstalled - karma-chrome-launcher finds it automatically.
+      - run: ./gradlew jsBrowserTest
