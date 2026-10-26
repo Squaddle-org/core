@@ -8,6 +8,8 @@ import org.squaddle.core.crypto.LibsodiumCrypto
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
 import org.squaddle.core.membership.roomId
+import org.squaddle.core.ops.OpBody
+import org.squaddle.core.ops.materializeRoomState
 import org.squaddle.core.store.LocalStore
 import org.squaddle.core.store.createSqlDriver
 import org.squaddle.core.sync.ListRoomsOutcome
@@ -38,6 +40,23 @@ public class CreateRoomResult(public val ok: Boolean, public val roomId: ByteArr
 
 @JsExport
 public class CreateInviteResult(public val ok: Boolean, public val inviteId: ByteArray?, public val inviteSecret: ByteArray?, public val status: Int, public val code: String, public val message: String)
+
+/** [score] is the sum of every active member's vote value on this idea; [myVote] is the
+ * caller's own vote value, or `null` if they haven't voted. [tags] is always present (empty
+ * array, not `null`) - matches [org.squaddle.core.ops.Idea.tags]'s own non-nullable default. */
+@JsExport
+public class IdeaJs(
+    public val id: ByteArray,
+    public val createdBy: ByteArray,
+    public val title: String,
+    public val desc: String?,
+    public val tags: Array<String>,
+    public val score: Int,
+    public val myVote: Int?,
+)
+
+@JsExport
+public class CommentJs(public val id: ByteArray, public val ideaId: ByteArray, public val author: ByteArray, public val text: String)
 
 private fun PushOutcome.toJs(): PushResult = when (this) {
     is PushOutcome.Ok -> PushResult.ok()
@@ -121,6 +140,55 @@ public class RelaySession internal constructor(
         sync.peekInviteRoomName(roomId, inviteId, inviteSecret)
 
     public suspend fun pull(roomId: ByteArray): SyncResult = sync.pull(roomId).toJs()
+
+    /** Pure local replay (no network - call [pull] first for fresh data), sorted by [IdeaJs.score]
+     * descending to match the Room screen's "ideas by score" ordering. Deleted ideas are
+     * filtered out - M5a has no idea-delete UI, but a future client could still produce one. */
+    public suspend fun listIdeas(roomId: ByteArray): Array<IdeaJs> {
+        val state = materializeRoomState(crypto, sync, store, roomId)
+        return state.ideas.values.filterNot { it.deleted }
+            .map { idea ->
+                val score = state.votesForIdea(idea.id).sumOf { it.value }
+                val myVote = state.myVoteForIdea(idea.id, userIdentity.userKey)?.value
+                IdeaJs(idea.id, idea.createdBy, idea.title, idea.desc, idea.tags.toTypedArray(), score, myVote)
+            }
+            .sortedByDescending { it.score }
+            .toTypedArray()
+    }
+
+    /** Pure local replay (no network - call [pull] first for fresh data). */
+    public suspend fun listComments(roomId: ByteArray, ideaId: ByteArray): Array<CommentJs> {
+        val state = materializeRoomState(crypto, sync, store, roomId)
+        return state.comments.values
+            .filter { it.ideaId.contentEquals(ideaId) && !it.deleted }
+            .map { CommentJs(it.id, it.ideaId, it.author, it.text) }
+            .toTypedArray()
+    }
+
+    /** Enqueues locally and makes a best-effort push - `false` only if the room's current epoch
+     * key isn't unwrapped yet (shouldn't happen after at least one successful [pull]). A failed
+     * push leaves the op queued for the next [pull]/push cycle to retry, same as android's
+     * `RealSyncGateway.enqueueAndPush`. */
+    public suspend fun createIdea(roomId: ByteArray, title: String, desc: String?): Boolean =
+        enqueueAndPush(roomId, OpBody.IdeaCreate(crypto.randomBytes(16), title, desc, emptyList()))
+
+    public suspend fun vote(roomId: ByteArray, ideaId: ByteArray, value: Int): Boolean =
+        enqueueAndPush(roomId, OpBody.VoteSet(ideaId, value))
+
+    public suspend fun addComment(roomId: ByteArray, ideaId: ByteArray, text: String): Boolean =
+        enqueueAndPush(roomId, OpBody.CommentAdd(crypto.randomBytes(16), ideaId, text))
+
+    private suspend fun enqueueAndPush(roomId: ByteArray, body: OpBody): Boolean {
+        if (!sync.enqueueOp(roomId, body)) return false
+        try {
+            sync.push(roomId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Already queued in the outbox - a later pull()/push() retries it.
+        }
+        return true
+    }
 }
 
 @JsExport

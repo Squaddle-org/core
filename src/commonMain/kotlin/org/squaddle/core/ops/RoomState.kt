@@ -272,4 +272,15 @@ public data class RoomState(
         if (existing != null && existing.stamp > stamp) return this
         return copy(profiles = profiles + (key to Profile(body.displayName, body.emoji, stamp)))
     }
+
+    /** [votes]' keys are `ideaIdHex + authorHex` with no reverse index back to either part, so
+     * finding every vote on one idea means a prefix scan - idea ids are always exactly 16 bytes
+     * (32 hex chars, fixed by every [OpBody.VoteSet]-producing caller), so the prefix match is
+     * unambiguous. Fine at M5a's scale; a real reverse index can wait for an actual need. */
+    public fun votesForIdea(ideaId: ByteArray): List<Vote> {
+        val prefix = ideaId.toKey()
+        return votes.filterKeys { it.startsWith(prefix) }.values.toList()
+    }
+
+    public fun myVoteForIdea(ideaId: ByteArray, user: ByteArray): Vote? = votes[ideaId.toKey() + user.toKey()]
 }

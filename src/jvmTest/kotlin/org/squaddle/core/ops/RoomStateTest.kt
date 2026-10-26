@@ -329,6 +329,29 @@ class RoomStateTest {
     }
 
     @Test
+    fun votesForIdeaAndMyVoteForIdeaFindTheRightEntriesByIdPrefix() = runTest {
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        val ideaA = crypto.randomBytes(16)
+        val ideaB = crypto.randomBytes(16)
+        val createA = room.op(member, OpBody.IdeaCreate(ideaA, "A", null, emptyList()))
+        val createB = room.op(member, OpBody.IdeaCreate(ideaB, "B", null, emptyList()))
+        val ownerVoteA = room.op(owner, OpBody.VoteSet(ideaA, 1))
+        val memberVoteA = room.op(member, OpBody.VoteSet(ideaA, -1))
+        val ownerVoteB = room.op(owner, OpBody.VoteSet(ideaB, 1))
+        val certs = listOf(owner, member)
+        val ops = listOf(createA, createB, ownerVoteA, memberVoteA, ownerVoteB).map { it to open(crypto, it, room.epochKey, certs)!! }
+
+        val state = RoomState.fold(ops, room.history())
+
+        assertEquals(setOf(1, -1), state.votesForIdea(ideaA).map { it.value }.toSet())
+        assertEquals(listOf(1), state.votesForIdea(ideaB).map { it.value })
+        assertEquals(1, state.myVoteForIdea(ideaA, owner.identity.userKey)?.value)
+        assertEquals(-1, state.myVoteForIdea(ideaA, member.identity.userKey)?.value)
+        assertNull(state.myVoteForIdea(ideaB, member.identity.userKey))
+    }
+
+    @Test
     fun propertyFoldIsOrderIndependent() = runTest {
         checkAll(Arb.int(3..8)) { opCount ->
             val crypto = crypto()
