@@ -5,11 +5,17 @@ package org.squaddle.core.jsapi
 import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.crypto.KeyPair
 import org.squaddle.core.crypto.LibsodiumCrypto
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
 import org.squaddle.core.membership.roomId
 import org.squaddle.core.ops.OpBody
 import org.squaddle.core.ops.materializeRoomState
+import org.squaddle.core.ops.replayMembershipHistory
 import org.squaddle.core.store.LocalStore
 import org.squaddle.core.store.createSqlDriver
 import org.squaddle.core.sync.ListRoomsOutcome
@@ -58,6 +64,20 @@ public class IdeaJs(
 @JsExport
 public class CommentJs(public val id: ByteArray, public val ideaId: ByteArray, public val author: ByteArray, public val text: String)
 
+/** [role] is one of `"owner"`, `"admin"`, `"member"`, `"pending"` (lowercased [org.squaddle.core.membership.Role.name]) -
+ * pending means an approval-required join awaiting an owner/admin's `approve` (§3.3). */
+@JsExport
+public class MemberJs(public val userKey: ByteArray, public val role: String)
+
+/** A handle on a running [RelaySession.connectLiveUpdates] subscription - [close] stops both the
+ * WebSocket and the local poll driving it (e.g. when the UI navigates away from the room). */
+@JsExport
+public class LiveUpdatesHandle internal constructor(private val job: Job) {
+    public fun close() {
+        job.cancel()
+    }
+}
+
 private fun PushOutcome.toJs(): PushResult = when (this) {
     is PushOutcome.Ok -> PushResult.ok()
     is PushOutcome.WaitingForRotation -> PushResult.waitingForRotation()
@@ -84,6 +104,8 @@ public class RelaySession internal constructor(
     private val userIdentity: UserIdentity,
     private val store: LocalStore,
 ) {
+    private val scope = CoroutineScope(SupervisorJob())
+
     public suspend fun registerDevice(): PushResult = sync.publishDeviceCert().toJs()
 
     public suspend fun createRoom(): CreateRoomResult {
@@ -188,6 +210,53 @@ public class RelaySession internal constructor(
             // Already queued in the outbox - a later pull()/push() retries it.
         }
         return true
+    }
+
+    /** Pure local replay (no network - call [pull] first for fresh data). Includes `"pending"`
+     * members (approval-required joins awaiting approval, §3.3) - read-only, no UI gating
+     * decisions are made off of this list in M5a. */
+    public suspend fun listMembers(roomId: ByteArray): Array<MemberJs> {
+        val (history, _) = replayMembershipHistory(crypto, store, roomId)
+        return history.current.members().map { MemberJs(it.user, it.role.name.lowercase()) }.toTypedArray()
+    }
+
+    /**
+     * Subscribes to [roomId]'s live updates (PROTOCOL.md §6) and invokes [onChanged] whenever
+     * new data actually lands locally. Two cooperating loops, same split android's
+     * `RealSyncGateway.connectLiveUpdates` uses: core's own [SyncClient.connectLiveUpdates]
+     * suspends for the socket's lifetime and already calls `pull()` on every server push, but
+     * exposes no "something changed" signal of its own; a second, local-SQLite-only poll (no
+     * network) notices when that pull actually landed new data and fires [onChanged] - simpler
+     * than adding a callback to core's socket loop itself for one caller. Call [LiveUpdatesHandle.close]
+     * when the UI navigates away (e.g. leaves the room screen) to stop both loops.
+     */
+    public fun connectLiveUpdates(roomId: ByteArray, onChanged: () -> Unit): LiveUpdatesHandle {
+        val job = scope.launch {
+            launch {
+                try {
+                    sync.connectLiveUpdates(listOf(roomId))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Best-effort: the local poll below still notices new data from a later pull().
+                }
+            }
+            launch {
+                var lastLogIndex = store.maxLogIndex(roomId)
+                var lastOpsCursor = store.maxOpsCursor(roomId)
+                while (true) {
+                    delay(1500)
+                    val logIndex = store.maxLogIndex(roomId)
+                    val opsCursor = store.maxOpsCursor(roomId)
+                    if (logIndex != lastLogIndex || opsCursor != lastOpsCursor) {
+                        lastLogIndex = logIndex
+                        lastOpsCursor = opsCursor
+                        onChanged()
+                    }
+                }
+            }
+        }
+        return LiveUpdatesHandle(job)
     }
 }
 
