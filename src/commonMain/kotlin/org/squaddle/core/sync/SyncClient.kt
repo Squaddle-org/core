@@ -14,6 +14,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.websocket.Frame
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import org.squaddle.core.crypto.Crypto
 import org.squaddle.core.crypto.KeyPair
@@ -52,6 +53,19 @@ private data class WsEvent(val r: String, val c: Long, val k: String)
 
 @Serializable
 private data class WsSubscribe(val sub: List<String>)
+
+@Serializable
+private data class RemoteRoomRefDto(val roomId: String, val relayHost: String)
+
+/** One row of `GET /users/{user}/rooms` (PROTOCOL.md §5, spec v1.0.0-draft.3) - a room this
+ * user holds an active role in on the relay that was asked, with that room's own recorded
+ * relayHost (§3.3 row 0 field 1). */
+public data class RemoteRoomRef(val roomId: ByteArray, val relayHost: String)
+
+public sealed interface ListRoomsOutcome {
+    public data class Ok(val rooms: List<RemoteRoomRef>) : ListRoomsOutcome
+    public data class Error(val status: Int, val code: String, val message: String) : ListRoomsOutcome
+}
 
 public sealed interface SyncOutcome {
     public data object Ok : SyncOutcome
@@ -114,6 +128,8 @@ public class SyncClient(
     }
 
     private fun b64Url(bytes: ByteArray): String = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).encode(bytes)
+
+    private fun b64UrlDecode(text: String): ByteArray = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).decode(text)
 
     private fun path(suffix: String): String = "/v1$suffix"
 
@@ -530,6 +546,23 @@ public class SyncClient(
             return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "device cert publish failed")
         }
         return PushOutcome.Ok
+    }
+
+    /** `GET /users/{user}/rooms` (PROTOCOL.md §5, spec v1.0.0-draft.3) - lists every room on this
+     * relay where [userIdentity] holds an active role, for seed-only-restore room recovery. Scoped
+     * to this single relay host: a user with rooms on other relays needs to ask each one. */
+    public suspend fun listMyRooms(): ListRoomsOutcome {
+        val resp = authedRequest(HttpMethod.Get, path("/users/${b64Url(userIdentity.userKey)}/rooms"))
+        if (resp.status != HttpStatusCode.OK) {
+            val err = parseError(resp.bodyAsBytes())
+            return ListRoomsOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "listing rooms failed")
+        }
+        val items = try {
+            Json.decodeFromString(ListSerializer(RemoteRoomRefDto.serializer()), resp.bodyAsBytes().decodeToString())
+        } catch (e: Exception) {
+            return ListRoomsOutcome.Error(resp.status.value, "invalid", "unparseable response body")
+        }
+        return ListRoomsOutcome.Ok(items.map { RemoteRoomRef(b64UrlDecode(it.roomId), it.relayHost) })
     }
 
     /** Fetches and opens an invite envelope (unauthenticated GET, per §3.5/relay-api.yaml), pulls
