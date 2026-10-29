@@ -51,6 +51,12 @@ fun main(rawArgs: Array<String>) {
             "room state" -> cmdRoomState(crypto, dataDir, requireRelay(relay), positional.single())
             "idea add" -> cmdIdeaAdd(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
             "idea vote" -> cmdIdeaVote(crypto, dataDir, requireRelay(relay), positional[0], positional[1], positional[2].toInt())
+            "idea comment" -> cmdIdeaComment(crypto, dataDir, requireRelay(relay), positional[0], positional[1], positional[2])
+            "event create" -> cmdEventCreate(
+                crypto, dataDir, requireRelay(relay), positional[0], positional[1], positional[2], positional[3].toLong(),
+                flags["all-day"] == "true", flags["location"],
+            )
+            "event rsvp" -> cmdEventRsvp(crypto, dataDir, requireRelay(relay), positional[0], positional[1], positional[2])
             "member kick" -> cmdMemberKick(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
             else -> printUsageAndExit()
         }
@@ -92,6 +98,9 @@ private fun printUsageAndExit(): Nothing {
           room state -relay <host> <roomRef>
           idea add -relay <host> <roomRef> <title>
           idea vote -relay <host> <roomRef> <ideaIdHex> <value>
+          idea comment -relay <host> <roomRef> <ideaIdHex> <text>
+          event create -relay <host> <roomRef> <ideaIdHex|-> <title> <startUnix> [-all-day true] [-location <text>]
+          event rsvp -relay <host> <roomRef> <eventIdHex> <yes|no|maybe>
           member kick -relay <host> <roomRef> <userKeyB64>
         """.trimIndent(),
     )
@@ -104,6 +113,8 @@ private fun printUsageAndExit(): Nothing {
 
 private fun b64(bytes: ByteArray): String = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).encode(bytes)
 private fun unb64(s: String): ByteArray = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT).decode(s)
+private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+private fun unhex(s: String): ByteArray = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
 private class CliIdentity(val userIdentity: UserIdentity, val device: org.squaddle.core.crypto.KeyPair, val cert: DeviceCert)
 
@@ -306,10 +317,60 @@ private suspend fun cmdIdeaVote(crypto: Crypto, dataDir: File, relay: String, ro
     val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
     sync.pull(roomIdBytes)
     sync.rehydrateEpochKeys(roomIdBytes)
-    val ideaId = ByteArray(ideaIdHex.length / 2) { ((ideaIdHex.substring(it * 2, it * 2 + 2)).toInt(16)).toByte() }
+    val ideaId = unhex(ideaIdHex)
     check(sync.enqueueOp(roomIdBytes, OpBody.VoteSet(ideaId, value))) { "no epoch key available - pull first" }
     exitOnFailure(sync.push(roomIdBytes))
     println("voted $value on $ideaIdHex")
+}
+
+private suspend fun cmdIdeaComment(crypto: Crypto, dataDir: File, relay: String, roomRef: String, ideaIdHex: String, text: String) {
+    val (sync, _, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    sync.rehydrateEpochKeys(roomIdBytes)
+    val ideaId = unhex(ideaIdHex)
+    val commentId = crypto.randomBytes(16)
+    check(sync.enqueueOp(roomIdBytes, OpBody.CommentAdd(commentId, ideaId, text))) { "no epoch key available - pull first" }
+    exitOnFailure(sync.push(roomIdBytes))
+    println("comment added: ${hex(commentId)}")
+}
+
+// tz is always "UTC" and end is always unset here - this is a manual-test harness, not a full
+// client; both are free to add if a test flow ever actually needs them.
+private suspend fun cmdEventCreate(
+    crypto: Crypto,
+    dataDir: File,
+    relay: String,
+    roomRef: String,
+    ideaIdHexOrDash: String,
+    title: String,
+    startUnix: Long,
+    allDay: Boolean,
+    location: String?,
+) {
+    val (sync, _, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    sync.rehydrateEpochKeys(roomIdBytes)
+    val ideaId = if (ideaIdHexOrDash == "-") null else unhex(ideaIdHexOrDash)
+    val eventId = crypto.randomBytes(16)
+    check(
+        sync.enqueueOp(roomIdBytes, OpBody.EventCreate(eventId, ideaId, title, startUnix, null, "UTC", location, allDay)),
+    ) { "no epoch key available - pull first" }
+    exitOnFailure(sync.push(roomIdBytes))
+    println("event created: ${hex(eventId)}")
+}
+
+private suspend fun cmdEventRsvp(crypto: Crypto, dataDir: File, relay: String, roomRef: String, eventIdHex: String, value: String) {
+    require(value == "yes" || value == "no" || value == "maybe") { "rsvp value must be yes|no|maybe, got $value" }
+    val (sync, _, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    sync.rehydrateEpochKeys(roomIdBytes)
+    val eventId = unhex(eventIdHex)
+    check(sync.enqueueOp(roomIdBytes, OpBody.RsvpSet(eventId, value))) { "no epoch key available - pull first" }
+    exitOnFailure(sync.push(roomIdBytes))
+    println("rsvp $value on $eventIdHex")
 }
 
 private suspend fun cmdMemberKick(crypto: Crypto, dataDir: File, relay: String, roomRef: String, userKeyB64: String) {
