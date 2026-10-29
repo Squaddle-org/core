@@ -18,7 +18,11 @@ kotlin {
     // separate androidTarget() + top-level android{} — see com.android.kotlin.multiplatform.library.
     android {
         namespace = "org.squaddle.core"
-        compileSdk = 36
+        // Bumped from 36 (android app module's M4b item 12: a release build failed its own
+        // AAR-metadata check otherwise - `io.ktor:ktor-client-okhttp`'s `okhttp-android:5.5.0`
+        // transitive dependency requires compiling against API 37+, and that check runs on
+        // every consumer of this module, not just this module's own build).
+        compileSdk = 37
         minSdk = 26
         withHostTestBuilder {}.configure {}
         // Real on-device run of the native libsodium bindings (M0 only verified JVM + that this
