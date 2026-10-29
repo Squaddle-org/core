@@ -68,6 +68,47 @@ public sealed interface ListRoomsOutcome {
     public data class Error(val status: Int, val code: String, val message: String) : ListRoomsOutcome
 }
 
+@Serializable
+private data class RoomLimitsDto(
+    val tier: String,
+    val maxMembers: Int? = null,
+    val maxPending: Int? = null,
+    val opRetentionDays: Int? = null,
+    val attachmentBytes: Long? = null,
+    val maxActiveInvites: Int? = null,
+    val boostedUntil: Long? = null,
+)
+
+/** `GET /rooms/{room}/limits` response (PROTOCOL.md §8.1) - `null` fields mean unlimited for
+ * that dimension, not "unknown"; `tier` is one of `"free"|"boosted"|"unlimited"|"custom"`. */
+public data class RoomLimits(
+    val tier: String,
+    val maxMembers: Int?,
+    val maxPending: Int?,
+    val opRetentionDays: Int?,
+    val attachmentBytes: Long?,
+    val maxActiveInvites: Int?,
+    val boostedUntil: Long?,
+)
+
+public sealed interface LimitsOutcome {
+    public data class Ok(val limits: RoomLimits) : LimitsOutcome
+    public data class Error(val status: Int, val code: String, val message: String) : LimitsOutcome
+}
+
+@Serializable
+private data class EntitlementRequestDto(val room: String, val provider: String, val token: String)
+
+@Serializable
+private data class EntitlementResponseDto(val room: String, val tier: String, val until: Long? = null)
+
+/** `POST /entitlements` result (PROTOCOL.md §8.3) - `until` is `null` for tier `"unlimited"`
+ * (vouchers of that tier never expire). */
+public sealed interface EntitlementOutcome {
+    public data class Ok(val tier: String, val until: Long?) : EntitlementOutcome
+    public data class Error(val status: Int, val code: String, val message: String) : EntitlementOutcome
+}
+
 public sealed interface SyncOutcome {
     public data object Ok : SyncOutcome
     public data class Error(val status: Int, val code: String, val message: String) : SyncOutcome
@@ -134,7 +175,15 @@ public class SyncClient(
 
     private fun path(suffix: String): String = "/v1$suffix"
 
-    private suspend fun authedRequest(method: HttpMethod, pathAndQuery: String, body: ByteArray = ByteArray(0)): HttpResponse {
+    private suspend fun authedRequest(
+        method: HttpMethod,
+        pathAndQuery: String,
+        body: ByteArray = ByteArray(0),
+        /** PROTOCOL.md §5's signing input is method+path+ts+nonce+BLAKE2b(body) only - the
+         * Content-Type header is never part of it, so this is free to vary per endpoint.
+         * `/v1/entitlements` is the one JSON (not CBOR) request body in this API. */
+        contentType: String = "application/cbor",
+    ): HttpResponse {
         val ts = nowUnixSeconds()
         val nonce = crypto.randomBytes(16)
         val header = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, method.value, pathAndQuery, ts, nonce, body)
@@ -142,7 +191,7 @@ public class SyncClient(
             this.method = method
             header("Authorization", header)
             if (method != HttpMethod.Get) {
-                header("Content-Type", "application/cbor")
+                header("Content-Type", contentType)
                 setBody(body)
             }
         }
@@ -564,6 +613,39 @@ public class SyncClient(
             return ListRoomsOutcome.Error(resp.status.value, "invalid", "unparseable response body")
         }
         return ListRoomsOutcome.Ok(items.map { RemoteRoomRef(b64UrlDecode(it.roomId), it.relayHost) })
+    }
+
+    /** `GET /rooms/{room}/limits` (PROTOCOL.md §8.1) - members only. */
+    public suspend fun getLimits(room: ByteArray): LimitsOutcome {
+        val resp = authedRequest(HttpMethod.Get, path("/rooms/${b64Url(room)}/limits"))
+        if (resp.status != HttpStatusCode.OK) {
+            val err = parseError(resp.bodyAsBytes())
+            return LimitsOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "fetching limits failed")
+        }
+        val dto = try {
+            Json.decodeFromString(RoomLimitsDto.serializer(), resp.bodyAsBytes().decodeToString())
+        } catch (e: Exception) {
+            return LimitsOutcome.Error(resp.status.value, "invalid", "unparseable response body")
+        }
+        return LimitsOutcome.Ok(RoomLimits(dto.tier, dto.maxMembers, dto.maxPending, dto.opRetentionDays, dto.attachmentBytes, dto.maxActiveInvites, dto.boostedUntil))
+    }
+
+    /** Redeems a voucher code for [room] (PROTOCOL.md §8.3, `POST /entitlements`) - caller must
+     * already be a member. Voucher only: `google_play` stays unimplemented here too, matching
+     * the relay's own current scope (its handler rejects that provider outright - M5b). */
+    public suspend fun redeemVoucher(room: ByteArray, code: String): EntitlementOutcome {
+        val body = Json.encodeToString(EntitlementRequestDto.serializer(), EntitlementRequestDto(b64Url(room), "voucher", code)).encodeToByteArray()
+        val resp = authedRequest(HttpMethod.Post, path("/entitlements"), body, contentType = "application/json")
+        if (resp.status != HttpStatusCode.Created) {
+            val err = parseError(resp.bodyAsBytes())
+            return EntitlementOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "redeeming voucher failed")
+        }
+        val dto = try {
+            Json.decodeFromString(EntitlementResponseDto.serializer(), resp.bodyAsBytes().decodeToString())
+        } catch (e: Exception) {
+            return EntitlementOutcome.Error(resp.status.value, "invalid", "unparseable response body")
+        }
+        return EntitlementOutcome.Ok(dto.tier, dto.until)
     }
 
     /** Fetches and opens an invite envelope read-only - no pull, no join entry - so a join

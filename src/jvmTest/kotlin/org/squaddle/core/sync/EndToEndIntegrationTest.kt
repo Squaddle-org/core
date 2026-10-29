@@ -244,4 +244,78 @@ class EndToEndIntegrationTest {
         assertEquals(ownerState.votes.keys, memberBState.votes.keys)
         assertFalse(ownerState.votes.isEmpty())
     }
+
+    /**
+     * `getLimits`/`redeemVoucher` round-trip against a real relay in `-limits hosted` mode (the
+     * `-limits none` every other test in this file uses always resolves `unlimited` regardless
+     * of entitlements - `internal/limits/limits.go`'s own `Resolve` - so this test needs the
+     * actual hosted policy to see a free->boosted transition at all).
+     */
+    @Test
+    fun limitsAndVoucherRedemption() = runTest {
+        val goExe = findGoExecutable()
+        assumeTrue("`go` not found on PATH or at the documented fallback - skipping the real-relay integration test", goExe != null)
+
+        val relayDir = File("../relay")
+        assumeTrue("../relay checkout not found", relayDir.isDirectory)
+
+        val dbFile = File.createTempFile("squaddle-limits", ".db")
+        dbFile.deleteOnExit()
+        val listenPort = freePort()
+        val metricsPort = freePort()
+
+        // Build once and mint the voucher *before* the server ever opens this db file - minting
+        // via a second process concurrently with the running server hit real cross-process
+        // SQLite read staleness (the server's own connection didn't see the other process's
+        // just-committed insert); doing it first, sequentially, against a file nothing else has
+        // open yet, avoids that question entirely rather than chasing journal-mode settings.
+        val relayBin = File.createTempFile("squaddle-relay", "")
+        relayBin.deleteOnExit()
+        val build = ProcessBuilder(goExe, "build", "-o", relayBin.absolutePath, "./cmd/relay").directory(relayDir).redirectErrorStream(true).start()
+        check(build.waitFor() == 0) { "go build failed:\n${build.inputStream.bufferedReader().readText()}" }
+        val mint = ProcessBuilder(relayBin.absolutePath, "voucher", "mint", "-tier=boosted", "-duration-days=30", "-db", dbFile.absolutePath)
+            .redirectErrorStream(true).start()
+        val mintOutput = mint.inputStream.bufferedReader().readText()
+        check(mint.waitFor() == 0) { "voucher mint failed:\n$mintOutput" }
+        val code = mintOutput.trim().lines().last()
+
+        relayProcess = ProcessBuilder(
+            relayBin.absolutePath,
+            "-db", dbFile.absolutePath,
+            "-listen", "127.0.0.1:$listenPort",
+            "-metrics", "127.0.0.1:$metricsPort",
+            "-limits", "hosted",
+        ).redirectErrorStream(true).start()
+        waitForHealthz(metricsPort)
+        val relay = "127.0.0.1:$listenPort"
+
+        val crypto: Crypto = LibsodiumCrypto.create()
+        val owner = newActor(crypto, relay, "Owner")
+
+        val roomNonce = crypto.randomBytes(16)
+        val room = roomId(crypto, owner.identity.userKey, roomNonce)
+        assertEquals(PushOutcome.Ok, owner.sync.createRoom(room, roomNonce))
+
+        val freeOutcome = owner.sync.getLimits(room)
+        assertTrue(freeOutcome is LimitsOutcome.Ok, "expected Ok, got $freeOutcome")
+        assertEquals("free", freeOutcome.limits.tier)
+        assertEquals(20, freeOutcome.limits.maxMembers)
+
+        val redeemOutcome = owner.sync.redeemVoucher(room, code)
+        assertTrue(redeemOutcome is EntitlementOutcome.Ok, "expected Ok, got $redeemOutcome")
+        assertEquals("boosted", redeemOutcome.tier)
+        assertTrue(redeemOutcome.until != null, "boosted entitlement should have an expiry")
+
+        val boostedOutcome = owner.sync.getLimits(room)
+        assertTrue(boostedOutcome is LimitsOutcome.Ok, "expected Ok, got $boostedOutcome")
+        assertEquals("boosted", boostedOutcome.limits.tier)
+        assertEquals(100, boostedOutcome.limits.maxMembers)
+
+        // Redeeming the same code twice (already redeemed) must fail cleanly, not throw.
+        val reRedeemOutcome = owner.sync.redeemVoucher(room, code)
+        assertTrue(reRedeemOutcome is EntitlementOutcome.Error, "expected a clean Error for an already-redeemed code, got $reRedeemOutcome")
+
+        val badCodeOutcome = owner.sync.redeemVoucher(room, "not-a-real-voucher-code")
+        assertTrue(badCodeOutcome is EntitlementOutcome.Error, "expected a clean Error for an unknown code, got $badCodeOutcome")
+    }
 }
