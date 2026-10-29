@@ -97,6 +97,12 @@ public sealed interface LimitsOutcome {
 }
 
 @Serializable
+private data class PushRegisterDto(val endpoint: String)
+
+@Serializable
+private data class VapidKeyDto(val publicKey: String)
+
+@Serializable
 private data class EntitlementRequestDto(val room: String, val provider: String, val token: String)
 
 @Serializable
@@ -646,6 +652,50 @@ public class SyncClient(
             return EntitlementOutcome.Error(resp.status.value, "invalid", "unparseable response body")
         }
         return EntitlementOutcome.Ok(dto.tier, dto.until)
+    }
+
+    /** `GET /push/vapid` (relay-api.yaml, ADR-0013) - unauthenticated, like the invite-envelope
+     * fetch above. `null` on any failure (push not configured on this relay, unreachable, or an
+     * unparseable body) rather than throwing - callers pass this straight into UnifiedPush's own
+     * `register(vapid = ...)` parameter, where omitting it just means "no VAPID key known yet". */
+    public suspend fun vapidPublicKey(): String? {
+        val resp = try {
+            httpClient.request("$httpScheme://$relayHost${path("/push/vapid")}") { method = HttpMethod.Get }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        }
+        if (resp.status != HttpStatusCode.OK) return null
+        return try {
+            Json.decodeFromString(VapidKeyDto.serializer(), resp.bodyAsBytes().decodeToString()).publicKey
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** `POST /push` (PROTOCOL.md §6, relay-api.yaml) - registers [endpoint] (the UnifiedPush
+     * distributor's own delivery URL) for the calling device. Re-registering overwrites the
+     * previous endpoint for this device - the relay keeps exactly one per device. */
+    public suspend fun registerPushEndpoint(endpoint: String): PushOutcome {
+        val body = Json.encodeToString(PushRegisterDto.serializer(), PushRegisterDto(endpoint)).encodeToByteArray()
+        val resp = authedRequest(HttpMethod.Post, path("/push"), body, contentType = "application/json")
+        if (resp.status != HttpStatusCode.NoContent) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "push registration failed")
+        }
+        return PushOutcome.Ok
+    }
+
+    /** `DELETE /push` - removes this device's push registration, e.g. on sign-out or when the
+     * user disables push in settings. */
+    public suspend fun unregisterPush(): PushOutcome {
+        val resp = authedRequest(HttpMethod.Delete, path("/push"))
+        if (resp.status != HttpStatusCode.NoContent) {
+            val err = parseError(resp.bodyAsBytes())
+            return PushOutcome.Error(resp.status.value, err?.code ?: "invalid", err?.message ?: "push unregistration failed")
+        }
+        return PushOutcome.Ok
     }
 
     /** Fetches and opens an invite envelope read-only - no pull, no join entry - so a join

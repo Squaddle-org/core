@@ -78,7 +78,7 @@ class EndToEndIntegrationTest {
         error("relay did not become healthy within ${timeoutMs}ms")
     }
 
-    private fun startRelay(goExe: String, relayDir: File, dbFile: File, listenPort: Int, metricsPort: Int): Process {
+    private fun startRelay(goExe: String, relayDir: File, dbFile: File, listenPort: Int, metricsPort: Int, vapidKeyFile: File? = null): Process {
         val binFile = File.createTempFile("squaddle-relay", "")
         binFile.deleteOnExit()
         val build = ProcessBuilder(goExe, "build", "-o", binFile.absolutePath, "./cmd/relay")
@@ -88,13 +88,17 @@ class EndToEndIntegrationTest {
         val buildOutput = build.inputStream.bufferedReader().readText()
         check(build.waitFor() == 0) { "go build failed:\n$buildOutput" }
 
-        val proc = ProcessBuilder(
+        val args = mutableListOf(
             binFile.absolutePath,
             "-db", dbFile.absolutePath,
             "-listen", "127.0.0.1:$listenPort",
             "-metrics", "127.0.0.1:$metricsPort",
             "-limits", "none",
-        ).redirectErrorStream(true).start()
+        )
+        if (vapidKeyFile != null) {
+            args += listOf("-vapid-private-key-file", vapidKeyFile.absolutePath)
+        }
+        val proc = ProcessBuilder(args).redirectErrorStream(true).start()
         waitForHealthz(metricsPort)
         return proc
     }
@@ -317,5 +321,70 @@ class EndToEndIntegrationTest {
 
         val badCodeOutcome = owner.sync.redeemVoucher(room, "not-a-real-voucher-code")
         assertTrue(badCodeOutcome is EntitlementOutcome.Error, "expected a clean Error for an unknown code, got $badCodeOutcome")
+    }
+
+    /** `relay vapid generate`'s stdout is `<banner line>\n<PEM>\n<banner line>\n<base64url
+     * public key>\n` (cmd/relay/vapid.go) - extracts just the PEM block, the one thing
+     * `-vapid-private-key-file` reads back in. */
+    private fun extractPem(vapidGenerateOutput: String): String {
+        val begin = vapidGenerateOutput.indexOf("-----BEGIN")
+        val end = vapidGenerateOutput.indexOf("-----END EC PRIVATE KEY-----") + "-----END EC PRIVATE KEY-----".length
+        check(begin >= 0 && end > begin) { "no PEM block found in:\n$vapidGenerateOutput" }
+        return vapidGenerateOutput.substring(begin, end) + "\n"
+    }
+
+    /**
+     * `vapidPublicKey`/`registerPushEndpoint`/`unregisterPush` against a real relay - mirrors
+     * `limitsAndVoucherRedemption`'s "build once, mint/generate before the server opens the db"
+     * discipline. With no `-vapid-private-key-file` at all, `GET /v1/push/vapid` must 404 and
+     * [SyncClient.vapidPublicKey] must return `null` rather than throwing (ADR-0013: push stays
+     * disabled, not a hard failure, for every self-hosted relay that never configures a key).
+     */
+    @Test
+    fun pushRegistrationAndVapidKey() = runTest {
+        val goExe = findGoExecutable()
+        assumeTrue("`go` not found on PATH or at the documented fallback - skipping the real-relay integration test", goExe != null)
+
+        val relayDir = File("../relay")
+        assumeTrue("../relay checkout not found", relayDir.isDirectory)
+
+        val relayBin = File.createTempFile("squaddle-relay", "")
+        relayBin.deleteOnExit()
+        val build = ProcessBuilder(goExe, "build", "-o", relayBin.absolutePath, "./cmd/relay").directory(relayDir).redirectErrorStream(true).start()
+        check(build.waitFor() == 0) { "go build failed:\n${build.inputStream.bufferedReader().readText()}" }
+
+        val generate = ProcessBuilder(relayBin.absolutePath, "vapid", "generate").redirectErrorStream(true).start()
+        val generateOutput = generate.inputStream.bufferedReader().readText()
+        check(generate.waitFor() == 0) { "vapid generate failed:\n$generateOutput" }
+        val keyFile = File.createTempFile("vapid-key", ".pem")
+        keyFile.deleteOnExit()
+        keyFile.writeText(extractPem(generateOutput))
+
+        // --- no VAPID key configured: push stays disabled, not an error ---
+        val noKeyDbFile = File.createTempFile("squaddle-push-nokey", ".db")
+        noKeyDbFile.deleteOnExit()
+        val noKeyListenPort = freePort()
+        val noKeyMetricsPort = freePort()
+        relayProcess = startRelay(goExe!!, relayDir, noKeyDbFile, noKeyListenPort, noKeyMetricsPort)
+        val crypto: Crypto = LibsodiumCrypto.create()
+        val noKeyActor = newActor(crypto, "127.0.0.1:$noKeyListenPort", "NoKeyDevice")
+        assertEquals(null, noKeyActor.sync.vapidPublicKey(), "a relay with no -vapid-private-key-file must not serve a public key")
+        relayProcess?.destroy()
+        relayProcess?.waitFor()
+
+        // --- with a configured key: the served public key, register, and unregister all work ---
+        val dbFile = File.createTempFile("squaddle-push", ".db")
+        dbFile.deleteOnExit()
+        val listenPort = freePort()
+        val metricsPort = freePort()
+        relayProcess = startRelay(goExe!!, relayDir, dbFile, listenPort, metricsPort, vapidKeyFile = keyFile)
+        val relay = "127.0.0.1:$listenPort"
+
+        val actor = newActor(crypto, relay, "Device")
+        val servedPublicKey = actor.sync.vapidPublicKey()
+        assertTrue(servedPublicKey != null && servedPublicKey.isNotBlank(), "expected a served VAPID public key, got $servedPublicKey")
+
+        assertEquals(PushOutcome.Ok, actor.sync.registerPushEndpoint("https://push.example.org/endpoint/abc123"))
+        assertEquals(PushOutcome.Ok, actor.sync.unregisterPush())
     }
 }
