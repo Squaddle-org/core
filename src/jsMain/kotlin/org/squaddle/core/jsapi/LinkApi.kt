@@ -8,7 +8,6 @@ import org.squaddle.core.crypto.LibsodiumCrypto
 import org.squaddle.core.encoding.Base32
 import org.squaddle.core.link.DeviceLink
 import org.squaddle.core.link.LinkQr
-import org.squaddle.core.sync.createHttpClient
 
 /** [uri] is the full `squaddle-link:v1:...` string ({@link LinkQr.toUri}) - callers encode this
  * into a QR image (slave/N role) or get it from decoding a scanned camera frame (master/E role). */
@@ -72,9 +71,9 @@ public object LinkApi {
     }
 
     public suspend fun postMailbox(relayHost: String, code: ByteArray, blob: ByteArray, tls: Boolean = true): Boolean =
-        DeviceLink.postMailbox(createHttpClient(), relayHost, code, blob, tls)
+        DeviceLink.postMailbox(relayHost, code, blob, tls)
 
     /** One GET; the caller (webclient's own poll loop) decides the retry cadence. */
     public suspend fun pollMailbox(relayHost: String, code: ByteArray, tls: Boolean = true): ByteArray? =
-        DeviceLink.pollMailbox(createHttpClient(), relayHost, code, tls)
+        DeviceLink.pollMailbox(relayHost, code, tls)
 }

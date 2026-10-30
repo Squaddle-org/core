@@ -2,7 +2,6 @@
 
 package org.squaddle.core.link
 
-import io.ktor.client.HttpClient
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsBytes
@@ -15,6 +14,7 @@ import org.squaddle.core.encoding.CanonicalCborCodec
 import org.squaddle.core.encoding.CborFormatException
 import org.squaddle.core.encoding.CborValue
 import org.squaddle.core.identity.UserIdentity
+import org.squaddle.core.sync.createHttpClient
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -131,10 +131,16 @@ public object DeviceLink {
         return (top20Bits % 1_000_000).toString().padStart(6, '0')
     }
 
-    /** Existing device (E), step 2's network call - unauthenticated, no device/session needed. */
-    public suspend fun postMailbox(httpClient: HttpClient, relayHost: String, code: ByteArray, blob: ByteArray, tls: Boolean = true): Boolean {
+    /** Existing device (E), step 2's network call - unauthenticated, no device/session needed.
+     * Builds its own one-shot [io.ktor.client.HttpClient] (not taken as a parameter: ktor's
+     * client types aren't part of `core`'s public API - `build.gradle.kts` depends on
+     * `ktor-client-core` as `implementation`, not `api`, so a consumer like android can call
+     * this function but can't itself reference an `HttpClient` type - confirmed directly, this
+     * was first written taking one as a parameter and failed to compile from android for exactly
+     * that reason). */
+    public suspend fun postMailbox(relayHost: String, code: ByteArray, blob: ByteArray, tls: Boolean = true): Boolean {
         val scheme = if (tls) "https" else "http"
-        val resp = httpClient.request("$scheme://$relayHost/v1/link/${b64Url(code)}") {
+        val resp = createHttpClient().request("$scheme://$relayHost/v1/link/${b64Url(code)}") {
             method = HttpMethod.Post
             setBody(blob)
         }
@@ -144,10 +150,12 @@ public object DeviceLink {
     /** New device (N), step 3's network call - one GET; the caller polls on its own schedule
      * (this makes no assumption about polling cadence/backoff policy). `null` on `404`/any
      * non-`200` status, same "not there yet, not an error" tolerance the mailbox's 5-minute TTL
-     * and single-read-deletes semantics expect callers to simply retry against. */
-    public suspend fun pollMailbox(httpClient: HttpClient, relayHost: String, code: ByteArray, tls: Boolean = true): ByteArray? {
+     * and single-read-deletes semantics expect callers to simply retry against. See
+     * [postMailbox]'s own doc comment on why this builds its own [io.ktor.client.HttpClient]
+     * rather than taking one as a parameter. */
+    public suspend fun pollMailbox(relayHost: String, code: ByteArray, tls: Boolean = true): ByteArray? {
         val scheme = if (tls) "https" else "http"
-        val resp = httpClient.request("$scheme://$relayHost/v1/link/${b64Url(code)}") { method = HttpMethod.Get }
+        val resp = createHttpClient().request("$scheme://$relayHost/v1/link/${b64Url(code)}") { method = HttpMethod.Get }
         if (resp.status != HttpStatusCode.OK) return null
         return resp.bodyAsBytes()
     }
