@@ -67,9 +67,12 @@ public class IdeaJs(
 public class CommentJs(public val id: ByteArray, public val ideaId: ByteArray, public val author: ByteArray, public val text: String)
 
 /** [role] is one of `"owner"`, `"admin"`, `"member"`, `"pending"` (lowercased [org.squaddle.core.membership.Role.name]) -
- * pending means an approval-required join awaiting an owner/admin's `approve` (§3.3). */
+ * pending means an approval-required join awaiting an owner/admin's `approve` (§3.3).
+ * [displayName] is this member's own `profile.set` op (content-plane, not membership-log - a
+ * member with no display name set yet, or a pending joiner with no epoch key to post ops at all,
+ * has `null` here), mirroring android's `MembersViewModel` reading `RoomState.profiles`. */
 @JsExport
-public class MemberJs(public val userKey: ByteArray, public val role: String)
+public class MemberJs(public val userKey: ByteArray, public val role: String, public val displayName: String?)
 
 /** [start]/[end] are Unix **seconds** (same unit as android's own `EventSummary`/`CalendarExport.kt`
  * - `Instant.ofEpochSecond`, not millis; multiply by 1000 before constructing a JS `Date`).
@@ -267,7 +270,10 @@ public class RelaySession internal constructor(
      * decisions are made off of this list in M5a. */
     public suspend fun listMembers(roomId: ByteArray): Array<MemberJs> {
         val (history, _) = replayMembershipHistory(crypto, store, roomId)
-        return history.current.members().map { MemberJs(it.user, it.role.name.lowercase()) }.toTypedArray()
+        val profiles = materializeRoomState(crypto, sync, store, roomId).profiles
+        return history.current.members()
+            .map { MemberJs(it.user, it.role.name.lowercase(), profiles[it.user.toKey()]?.displayName) }
+            .toTypedArray()
     }
 
     public suspend fun editIdea(roomId: ByteArray, id: ByteArray, field: String, value: String?): Boolean =
