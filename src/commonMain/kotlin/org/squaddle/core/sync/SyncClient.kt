@@ -491,6 +491,49 @@ public class SyncClient(
         return PushOutcome.Error(resp.status.value, err.code, err.message)
     }
 
+    /** Queues [body] (see [enqueueOp]) and immediately attempts a [push] - the same
+     * enqueue-then-best-effort-push shape every content-plane mutation below needs. A push
+     * failure is swallowed (the op stays queued in the outbox for the next successful
+     * pull/push, same as every other caller of [enqueueOp] already relies on); only a failure
+     * to enqueue at all (no epoch key unwrapped yet) is reported back. */
+    private suspend fun enqueueAndPush(room: ByteArray, body: OpBody): PushOutcome {
+        if (!enqueueOp(room, body)) {
+            return PushOutcome.Error(500, "invalid", "epoch key not available locally - pull() first")
+        }
+        return try {
+            push(room)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PushOutcome.Ok // op is already queued; a later pull()/push() retries it
+        }
+    }
+
+    /** PROTOCOL.md's op-log event fields (§4.2) - [ideaId] links this event to an idea it was
+     * scheduled from, or `null` for a standalone event. */
+    public suspend fun createEvent(
+        room: ByteArray,
+        ideaId: ByteArray?,
+        title: String,
+        start: Long,
+        end: Long?,
+        tz: String,
+        location: String?,
+        allDay: Boolean,
+    ): PushOutcome = enqueueAndPush(room, OpBody.EventCreate(crypto.randomBytes(16), ideaId, title, start, end, tz, location, allDay))
+
+    public suspend fun setEvent(room: ByteArray, id: ByteArray, field: String, value: Any?): PushOutcome =
+        enqueueAndPush(room, OpBody.EventSet(id, field, value))
+
+    public suspend fun cancelEvent(room: ByteArray, id: ByteArray): PushOutcome =
+        enqueueAndPush(room, OpBody.EventCancel(id))
+
+    public suspend fun rsvp(room: ByteArray, eventId: ByteArray, value: String): PushOutcome =
+        enqueueAndPush(room, OpBody.RsvpSet(eventId, value))
+
+    public suspend fun setProfile(room: ByteArray, displayName: String, emoji: String?): PushOutcome =
+        enqueueAndPush(room, OpBody.ProfileSet(displayName, emoji))
+
     /** Collects each current member's `userBoxKey` from the DeviceCert embedded in their most
      * recent authored log entry (every cert carries the author's actual per-user box key, not a
      * per-device one, per §2.1/§2.2). */
@@ -547,6 +590,48 @@ public class SyncClient(
             if (row.invite_id.toKey() !in activeOpenInviteIds) continue
             val envelope = InviteEnvelope.seal(crypto, row.secret, room, row.invite_id, newEpoch, newKey)
             authedRequest(HttpMethod.Put, path("/invites/${b64Url(room)}/${b64Url(row.invite_id)}/envelope"), envelope)
+        }
+    }
+
+    /** `REMOVE` + an immediate [autoRotate] right after - mirrors `core`'s own
+     * `EndToEndIntegrationTest` kick sequence exactly, rather than waiting for a lazy
+     * `rotation_required` bounce on some future content push. Caller must already hold
+     * owner/admin (the relay enforces this server-side; a non-admin's `REMOVE` is simply
+     * rejected). */
+    public suspend fun kick(room: ByteArray, target: ByteArray): PushOutcome {
+        val removeOutcome = appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.REMOVE, CborValue.Map(mapOf(0L to CborValue.Bytes(target))), nowUnixSeconds())
+        }
+        if (removeOutcome != PushOutcome.Ok) return removeOutcome
+        return autoRotate(room)
+    }
+
+    public suspend fun setRole(room: ByteArray, target: ByteArray, role: String): PushOutcome =
+        appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.SET_ROLE, CborValue.Map(mapOf(0L to CborValue.Bytes(target), 1L to CborValue.Text(role))), nowUnixSeconds())
+        }
+
+    public suspend fun transferOwner(room: ByteArray, target: ByteArray): PushOutcome =
+        appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.TRANSFER_OWNER, CborValue.Map(mapOf(0L to CborValue.Bytes(target))), nowUnixSeconds())
+        }
+
+    public suspend fun reject(room: ByteArray, target: ByteArray): PushOutcome =
+        appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.REJECT, CborValue.Map(mapOf(0L to CborValue.Bytes(target))), nowUnixSeconds())
+        }
+
+    /** Needs the target's own `userBoxKey` to seal the current epoch key for them - read off
+     * their own `join` entry's embedded cert via [collectUserBoxKeys]. */
+    public suspend fun approve(room: ByteArray, target: ByteArray): PushOutcome {
+        val epoch = replayMembershipState(room).epoch
+        val epochKey = epochKeyFor(room, epoch)
+            ?: return PushOutcome.Error(500, "invalid", "epoch key not available locally")
+        val targetUserBox = collectUserBoxKeys(room)[target.toKey()]
+            ?: return PushOutcome.Error(500, "invalid", "target's userBoxKey not found - have they sent a join entry yet?")
+        val sealed = EpochKeys.seal(crypto, targetUserBox, room, epoch, epochKey)
+        return appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.APPROVE, CborValue.Map(mapOf(0L to CborValue.Bytes(target), 1L to CborValue.Bytes(sealed))), nowUnixSeconds())
         }
     }
 

@@ -18,6 +18,8 @@ import org.squaddle.core.ops.materializeRoomState
 import org.squaddle.core.ops.replayMembershipHistory
 import org.squaddle.core.store.LocalStore
 import org.squaddle.core.store.createSqlDriver
+import org.squaddle.core.sync.EntitlementOutcome
+import org.squaddle.core.sync.LimitsOutcome
 import org.squaddle.core.sync.ListRoomsOutcome
 import org.squaddle.core.sync.PushOutcome
 import org.squaddle.core.sync.SyncClient
@@ -69,6 +71,46 @@ public class CommentJs(public val id: ByteArray, public val ideaId: ByteArray, p
 @JsExport
 public class MemberJs(public val userKey: ByteArray, public val role: String)
 
+/** [start]/[end] are millisecond epoch timestamps (JS `Date`-friendly, unlike core's own `Long`
+ * seconds-or-millis-agnostic field - callers construct a `Date` directly from these). [myRsvp] is
+ * `"yes"`/`"no"`/`"maybe"`, or `null` if the caller hasn't RSVPed. [canCancel] mirrors android's
+ * own `RoomViewModel.eventSummary`: admin/owner, or this event's own creator. */
+@JsExport
+public class EventJs(
+    public val id: ByteArray,
+    public val ideaId: ByteArray?,
+    public val createdBy: ByteArray,
+    public val title: String,
+    public val start: Double,
+    public val end: Double?,
+    public val tz: String,
+    public val location: String?,
+    public val allDay: Boolean,
+    public val canCancel: Boolean,
+    public val myRsvp: String?,
+    public val yesCount: Int,
+    public val noCount: Int,
+    public val maybeCount: Int,
+)
+
+@JsExport
+public class RoomLimitsJs(
+    public val ok: Boolean,
+    public val tier: String?,
+    public val maxMembers: Int?,
+    public val maxPending: Int?,
+    public val opRetentionDays: Int?,
+    public val attachmentBytes: Double?,
+    public val maxActiveInvites: Int?,
+    public val boostedUntil: Double?,
+    public val status: Int,
+    public val code: String,
+    public val message: String,
+)
+
+@JsExport
+public class EntitlementResultJs(public val ok: Boolean, public val tier: String?, public val until: Double?, public val status: Int, public val code: String, public val message: String)
+
 /** A handle on a running [RelaySession.connectLiveUpdates] subscription - [close] stops both the
  * WebSocket and the local poll driving it (e.g. when the UI navigates away from the room). */
 @JsExport
@@ -77,6 +119,8 @@ public class LiveUpdatesHandle internal constructor(private val job: Job) {
         job.cancel()
     }
 }
+
+private fun ByteArray.toKey(): String = org.squaddle.core.encoding.Hex.encode(this)
 
 private fun PushOutcome.toJs(): PushResult = when (this) {
     is PushOutcome.Ok -> PushResult.ok()
@@ -219,6 +263,116 @@ public class RelaySession internal constructor(
         val (history, _) = replayMembershipHistory(crypto, store, roomId)
         return history.current.members().map { MemberJs(it.user, it.role.name.lowercase()) }.toTypedArray()
     }
+
+    public suspend fun editIdea(roomId: ByteArray, id: ByteArray, field: String, value: String?): Boolean =
+        enqueueAndPush(roomId, OpBody.IdeaSet(id, field, value))
+
+    public suspend fun deleteIdea(roomId: ByteArray, id: ByteArray): Boolean =
+        enqueueAndPush(roomId, OpBody.IdeaDelete(id))
+
+    public suspend fun deleteComment(roomId: ByteArray, id: ByteArray): Boolean =
+        enqueueAndPush(roomId, OpBody.CommentDelete(id))
+
+    /** This caller's own role in [roomId], lowercased (see [MemberJs.role]) - `null` if not a
+     * member at all (shouldn't normally happen for a room the UI already has open). Pure local
+     * replay, same as [listMembers]. */
+    public suspend fun myRole(roomId: ByteArray): String? {
+        val (history, _) = replayMembershipHistory(crypto, store, roomId)
+        return history.current.roleOf(userIdentity.userKey)?.name?.lowercase()
+    }
+
+    /** Whether this caller is currently allowed to create an event in [roomId] - admin/owner
+     * always can; a plain member can only if the room's `membersCanCreateEvents` setting (§3.3
+     * row 11 field 1, default on) allows it at the room's current epoch. Mirrors android's
+     * `RoomViewModel`'s own `canCreateEvent` computation exactly. */
+    public suspend fun canCreateEvent(roomId: ByteArray): Boolean {
+        val (history, _) = replayMembershipHistory(crypto, store, roomId)
+        val role = history.current.roleOf(userIdentity.userKey)
+        return role == org.squaddle.core.membership.Role.ADMIN || role == org.squaddle.core.membership.Role.OWNER ||
+            (role == org.squaddle.core.membership.Role.MEMBER && history.membersCanCreateEventsAt(history.current.epoch))
+    }
+
+    /** Pure local replay (no network - call [pull] first for fresh data). Cancelled events are
+     * filtered out, sorted by start time - mirrors android's `RoomViewModel` exactly. */
+    public suspend fun listEvents(roomId: ByteArray): Array<EventJs> {
+        val myKeyHex = userIdentity.userKey.toKey()
+        val (history, _) = replayMembershipHistory(crypto, store, roomId)
+        val role = history.current.roleOf(userIdentity.userKey)
+        val isAdminOrOwner = role == org.squaddle.core.membership.Role.ADMIN || role == org.squaddle.core.membership.Role.OWNER
+        val state = materializeRoomState(crypto, sync, store, roomId)
+        return state.events.values
+            .filterNot { it.cancelled }
+            .map { event ->
+                val eventIdHex = event.id.toKey()
+                val forThisEvent = state.rsvps.filterKeys { it.startsWith(eventIdHex) }.values
+                EventJs(
+                    id = event.id, ideaId = event.ideaId, createdBy = event.createdBy, title = event.title,
+                    start = event.start.toDouble(), end = event.end?.toDouble(), tz = event.tz, location = event.location, allDay = event.allDay,
+                    canCancel = isAdminOrOwner || event.createdBy.contentEquals(userIdentity.userKey),
+                    myRsvp = state.rsvps[eventIdHex + myKeyHex]?.value,
+                    yesCount = forThisEvent.count { it.value == "yes" },
+                    noCount = forThisEvent.count { it.value == "no" },
+                    maybeCount = forThisEvent.count { it.value == "maybe" },
+                )
+            }
+            .sortedBy { it.start }
+            .toTypedArray()
+    }
+
+    public suspend fun createEvent(
+        roomId: ByteArray,
+        ideaId: ByteArray?,
+        title: String,
+        start: Double,
+        end: Double?,
+        tz: String,
+        location: String?,
+        allDay: Boolean,
+    ): PushResult = sync.createEvent(roomId, ideaId, title, start.toLong(), end?.toLong(), tz, location, allDay).toJs()
+
+    public suspend fun cancelEvent(roomId: ByteArray, id: ByteArray): PushResult = sync.cancelEvent(roomId, id).toJs()
+
+    /** [value] is `"yes"`, `"no"`, or `"maybe"` (PROTOCOL.md §4.3). */
+    public suspend fun rsvp(roomId: ByteArray, eventId: ByteArray, value: String): PushResult = sync.rsvp(roomId, eventId, value).toJs()
+
+    public suspend fun setProfile(roomId: ByteArray, displayName: String, emoji: String?): PushResult =
+        sync.setProfile(roomId, displayName, emoji).toJs()
+
+    public suspend fun kick(roomId: ByteArray, target: ByteArray): PushResult = sync.kick(roomId, target).toJs()
+
+    public suspend fun setRole(roomId: ByteArray, target: ByteArray, role: String): PushResult = sync.setRole(roomId, target, role).toJs()
+
+    public suspend fun transferOwner(roomId: ByteArray, target: ByteArray): PushResult = sync.transferOwner(roomId, target).toJs()
+
+    public suspend fun approve(roomId: ByteArray, target: ByteArray): PushResult = sync.approve(roomId, target).toJs()
+
+    public suspend fun reject(roomId: ByteArray, target: ByteArray): PushResult = sync.reject(roomId, target).toJs()
+
+    public suspend fun getLimits(roomId: ByteArray): RoomLimitsJs {
+        return when (val outcome = sync.getLimits(roomId)) {
+            is LimitsOutcome.Ok -> {
+                val l = outcome.limits
+                RoomLimitsJs(true, l.tier, l.maxMembers, l.maxPending, l.opRetentionDays, l.attachmentBytes?.toDouble(), l.maxActiveInvites, l.boostedUntil?.toDouble(), 0, "", "")
+            }
+            is LimitsOutcome.Error -> RoomLimitsJs(false, null, null, null, null, null, null, null, outcome.status, outcome.code, outcome.message)
+        }
+    }
+
+    public suspend fun redeemVoucher(roomId: ByteArray, code: String): EntitlementResultJs {
+        return when (val outcome = sync.redeemVoucher(roomId, code)) {
+            is EntitlementOutcome.Ok -> EntitlementResultJs(true, outcome.tier, outcome.until?.toDouble(), 0, "", "")
+            is EntitlementOutcome.Error -> EntitlementResultJs(false, null, null, outcome.status, outcome.code, outcome.message)
+        }
+    }
+
+    /** `null` if push isn't configured on this relay, or it's unreachable - see [SyncClient.vapidPublicKey]. */
+    public suspend fun vapidPublicKey(): String? = sync.vapidPublicKey()
+
+    /** Registers this browser's Web Push subscription endpoint (`PushSubscription.endpoint`) -
+     * the Web Push equivalent of android's UnifiedPush distributor endpoint. */
+    public suspend fun registerPushEndpoint(endpoint: String): PushResult = sync.registerPushEndpoint(endpoint).toJs()
+
+    public suspend fun unregisterPush(): PushResult = sync.unregisterPush().toJs()
 
     /**
      * Subscribes to [roomId]'s live updates (PROTOCOL.md §6) and invokes [onChanged] whenever
