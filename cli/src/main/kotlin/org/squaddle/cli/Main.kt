@@ -246,23 +246,42 @@ private suspend fun cmdRoomInvite(crypto: Crypto, dataDir: File, relay: String, 
     }
 }
 
+/** An **open** (no-approval) invite link carries `#<b64 inviteSecret>`; an **approval-required**
+ * one has no fragment at all (`createInvite` never seals/uploads an envelope for it - §3.5, the
+ * epoch key arrives later via the owner/admin's `approve` entry instead) - mirrors android's own
+ * `RealSyncGateway.joinViaLink` exactly: with no secret, skip straight to `pullLog` + a plain
+ * `JOIN` entry instead of `SyncClient.joinViaLink`'s envelope-fetch path. */
 private suspend fun cmdRoomJoin(crypto: Crypto, dataDir: File, link: String) {
-    // https://<linkHost>/j/<relayHost>/<b32 roomId>/<b32 inviteId>#<b64 inviteSecret>
+    // https://<linkHost>/j/<relayHost>/<b32 roomId>/<b32 inviteId>[#<b64 inviteSecret>]
     val afterJ = link.substringAfter("/j/")
-    val fragment = afterJ.substringAfter("#")
+    val hasSecret = afterJ.contains("#")
+    val fragment = afterJ.substringAfter("#", missingDelimiterValue = "")
     val pathPart = afterJ.substringBefore("#")
     val parts = pathPart.split("/")
     require(parts.size == 3) { "malformed invite link: $link" }
     val relay = parts[0]
     val roomIdBytes = Base32.decode(parts[1]) ?: run { System.err.println("bad roomId in link"); exitProcess(2) }
     val inviteId = Base32.decode(parts[2]) ?: run { System.err.println("bad inviteId in link"); exitProcess(2) }
-    val inviteSecret = unb64(fragment)
 
-    val (sync, _, _) = newSyncClient(crypto, dataDir, relay)
-    exitOnFailure(sync.joinViaLink(roomIdBytes, inviteId, inviteSecret))
+    val (sync, identity, _) = newSyncClient(crypto, dataDir, relay)
+    val outcome = if (hasSecret) {
+        sync.joinViaLink(roomIdBytes, inviteId, unb64(fragment))
+    } else {
+        val pullOutcome = sync.pullLog(roomIdBytes)
+        if (pullOutcome is org.squaddle.core.sync.SyncOutcome.Error) {
+            System.err.println("failed: $pullOutcome"); exitProcess(1)
+        }
+        sync.appendLogEntry(roomIdBytes) { index, prev ->
+            LogEntry.sign(
+                crypto, identity.device.secretKey, roomIdBytes, index, prev, identity.userIdentity.userKey, identity.cert,
+                EntryType.JOIN, CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId))), System.currentTimeMillis() / 1000,
+            )
+        }
+    }
+    exitOnFailure(outcome)
     val roomRef = roomRefOf(roomIdBytes, relay)
     saveRoomMeta(dataDir, roomRef, roomIdBytes, ByteArray(16), relay) // nonce unknown to a joiner - not needed again locally
-    println("joined $roomRef")
+    println(if (hasSecret) "joined $roomRef" else "joined $roomRef (pending approval)")
 }
 
 private fun certResolverFromLog(store: LocalStore, roomIdBytes: ByteArray): (ByteArray) -> DeviceCert? {
