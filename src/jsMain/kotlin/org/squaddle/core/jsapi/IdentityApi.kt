@@ -57,6 +57,16 @@ public object IdentityApi {
         return mint(crypto, identity, deviceLabel)
     }
 
+    /** The backup-file restore path (PROTOCOL.md §7): [entropy] is already decrypted (see
+     * `BackupApi.restore`'s own `BackupContentJs.entropy`), so there's no mnemonic to validate -
+     * mirrors android's `OnboardingViewModel` using `UserIdentity.fromEntropy` directly for this
+     * path instead of round-tripping through words. Same fresh-device-keypair minting as [create]/
+     * [restore]. */
+    public suspend fun restoreFromEntropy(entropy: ByteArray, deviceLabel: String): IdentityResult {
+        val crypto = LibsodiumCrypto.create()
+        return mint(crypto, UserIdentity.fromEntropy(crypto, entropy), deviceLabel)
+    }
+
     private fun mint(crypto: Crypto, identity: UserIdentity, deviceLabel: String): IdentityResult {
         val device = crypto.signSeedKeypair(crypto.randomBytes(32))
         val issuedAt = nowUnixSeconds()
