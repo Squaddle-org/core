@@ -8,9 +8,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     # Requires a human approval before this job starts (Settings -> Environments -> release,
-    # configured with a required reviewer) - the one human gate before anything actually reaches
-    # Maven Central, since mavenPublishing's own automaticRelease = true (build.gradle.kts) skips
-    # the separate "click Publish on the Central Portal website" step that would otherwise be it.
+    # configured with a required reviewer) - the one human gate before anything actually publishes.
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -18,13 +16,37 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
       - uses: gradle/actions/setup-gradle@7296c772c13d12d9871528814b51fb2143c138ef # v6.4.1
-      - run: ./gradlew publishToMavenCentral
+      # squaddle.version defaults to 0.1.0-SNAPSHOT (build.gradle.kts) unless overridden - the
+      # tag that triggered this run (v0.1.0 -> 0.1.0) is the real published version. Publishes to
+      # both `publishing.repositories` targets configured in build.gradle.kts: GitHubPackages
+      # (token-gated, credentials below) and GitHubPages (a local build/<module>/maven-repo/
+      # directory - uploaded as the Pages artifact by the next step, not a real URL on its own).
+      - run: ./gradlew publish -Psquaddle.version="${GITHUB_REF_NAME#v}"
         env:
-          # vanniktech/gradle-maven-publish-plugin's own documented env var names - a Central
-          # Portal user token (not your Central Portal login password - generated on the Central
-          # Portal website itself) and an in-memory-armored GPG key, both read directly from
-          # these repo-environment secrets, never written to disk.
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+      # Packages build/maven-repo/ as the Pages artifact - does not deploy it yet (the separate
+      # deploy-pages job below does, under its own github-pages environment, which is what makes
+      # the deployment show up tracked in this repo's own Environments list, the same way
+      # GitHub's own official Pages templates structure this as two jobs).
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with: { path: build/maven-repo }
+
+  # GitHub Pages must be enabled for this repo first (Settings -> Pages -> Build and deployment ->
+  # Source: GitHub Actions) - a one-time manual step this workflow can't flip on itself. Once it
+  # is, this is what actually makes the published artifact live at
+  # https://squaddle-org.github.io/core/ - a plain, anonymous, no-token-required static Maven
+  # repository (the whole reason this exists instead of just using GitHubPackages above, which
+  # requires a token to resolve even for public packages).
+  deploy-pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -15,7 +15,6 @@ libsodium-bindings = "0.9.5"
 kotest = "6.2.6"
 androidx-test-runner = "1.7.0"
 androidx-test-ext-junit = "1.3.0"
-maven-publish-plugin = "0.37.0"
 
 [libraries]
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -43,7 +42,3 @@ compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "
 android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 sqldelight = { id = "app.cash.sqldelight", version.ref = "sqldelight" }
-# Purpose-built for the Central Portal API with first-class Kotlin Multiplatform support (hand-
-# rolled maven-publish + signing is fiddly for KMP's multiple per-target publications) - verified
-# current on Maven Central before pinning, not guessed.
-maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "maven-publish-plugin" }
