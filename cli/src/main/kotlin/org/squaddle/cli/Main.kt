@@ -191,10 +191,13 @@ private fun openStore(dataDir: File): LocalStore {
 private suspend fun newSyncClient(crypto: Crypto, dataDir: File, relay: String): Triple<SyncClient, CliIdentity, LocalStore> {
     val identity = loadIdentity(crypto, dataDir)
     val store = openStore(dataDir)
-    // tls=false: this CLI talks directly to the relay binary (plain HTTP, see
-    // relay/cmd/relay/main.go) for local dev/manual testing - never a real deployment, which
-    // always terminates TLS upstream.
-    val sync = SyncClient(crypto, store, relay, identity.userIdentity, identity.device, identity.cert, tls = false)
+    // tls=false by default: this CLI normally talks directly to the relay binary (plain HTTP,
+    // see relay/cmd/relay/main.go) for local dev/manual testing. SQUADDLE_CLI_TLS=true switches
+    // to https - a real deployed relay (always terminates TLS upstream) otherwise 308-redirects
+    // plain HTTP and this CLI doesn't follow redirects. An env var rather than a new flag thread
+    // through every cmdXxx function - this is a manual-testing nicety, not a protocol concern.
+    val tls = System.getenv("SQUADDLE_CLI_TLS") == "true"
+    val sync = SyncClient(crypto, store, relay, identity.userIdentity, identity.device, identity.cert, tls = tls)
     sync.publishDeviceCert()
     return Triple(sync, identity, store)
 }
