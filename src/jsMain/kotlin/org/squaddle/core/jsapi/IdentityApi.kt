@@ -67,6 +67,15 @@ public object IdentityApi {
         return mint(crypto, UserIdentity.fromEntropy(crypto, entropy), deviceLabel)
     }
 
+    /** Settings screen's "reveal seed" action - a pure derivation from already-stored [entropy],
+     * no device keypair minted (unlike [create]/[restore]/[restoreFromEntropy], which all mint a
+     * fresh one): mirrors android's `SettingsViewModel` calling `UserIdentity.toMnemonic`
+     * directly on the already-loaded identity, not going through onboarding's mint path again. */
+    public suspend fun entropyToMnemonic(entropy: ByteArray): Array<String> {
+        val crypto = LibsodiumCrypto.create()
+        return UserIdentity.fromEntropy(crypto, entropy).toMnemonic(crypto).toTypedArray()
+    }
+
     private fun mint(crypto: Crypto, identity: UserIdentity, deviceLabel: String): IdentityResult {
         val device = crypto.signSeedKeypair(crypto.randomBytes(32))
         val issuedAt = nowUnixSeconds()
