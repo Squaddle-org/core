@@ -10,6 +10,7 @@ import org.squaddle.core.encoding.CborValue
 import org.squaddle.core.identity.DeviceCert
 import org.squaddle.core.identity.UserIdentity
 import org.squaddle.core.membership.EntryType
+import org.squaddle.core.membership.EpochKeys
 import org.squaddle.core.membership.LogEntry
 import org.squaddle.core.membership.MembershipStateImpl
 import org.squaddle.core.membership.StoredEntry
@@ -58,6 +59,11 @@ fun main(rawArgs: Array<String>) {
             )
             "event rsvp" -> cmdEventRsvp(crypto, dataDir, requireRelay(relay), positional[0], positional[1], positional[2])
             "member kick" -> cmdMemberKick(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
+            "member approve" -> cmdMemberApprove(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
+            "member promote" -> cmdMemberSetRole(crypto, dataDir, requireRelay(relay), positional[0], positional[1], "admin")
+            "member demote" -> cmdMemberSetRole(crypto, dataDir, requireRelay(relay), positional[0], positional[1], "member")
+            "member transfer" -> cmdMemberTransfer(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
+            "member list" -> cmdMemberList(crypto, dataDir, requireRelay(relay), positional[0])
             else -> printUsageAndExit()
         }
     }
@@ -102,6 +108,11 @@ private fun printUsageAndExit(): Nothing {
           event create -relay <host> <roomRef> <ideaIdHex|-> <title> <startUnix> [-all-day true] [-location <text>]
           event rsvp -relay <host> <roomRef> <eventIdHex> <yes|no|maybe>
           member kick -relay <host> <roomRef> <userKeyB64>
+          member approve -relay <host> <roomRef> <userKeyB64>
+          member promote -relay <host> <roomRef> <userKeyB64>   (-> admin)
+          member demote -relay <host> <roomRef> <userKeyB64>    (-> member)
+          member transfer -relay <host> <roomRef> <userKeyB64>  (owner only, target must be admin)
+          member list -relay <host> <roomRef>
         """.trimIndent(),
     )
     exitProcess(2)
@@ -390,4 +401,88 @@ private suspend fun cmdMemberKick(crypto: Crypto, dataDir: File, relay: String, 
     }
     exitOnFailure(outcome)
     println("removed $userKeyB64 from $roomRef - epoch rotation owed (ADR-0012), next push auto-rotates")
+}
+
+/** Mirrors android's own `RealSyncGateway.buildHistory` (app/src/main/kotlin/org/squaddle/app/data/RealSyncGateway.kt). */
+private fun membershipHistory(crypto: Crypto, store: LocalStore, roomIdBytes: ByteArray): MembershipHistory {
+    var state: org.squaddle.core.membership.MembershipState = MembershipStateImpl.empty(crypto)
+    val storedEntries = mutableListOf<StoredEntry>()
+    for (row in store.logEntriesFrom(roomIdBytes, 0L)) {
+        val entry = LogEntry.decode(row.entry_cbor) ?: continue
+        val stored = StoredEntry(entry, row.rts)
+        state = state.apply(stored).getOrElse { state }
+        storedEntries += stored
+    }
+    return MembershipHistory.build(storedEntries, MembershipStateImpl.empty(crypto))
+}
+
+/** Mirrors android's own `RealSyncGateway.collectUserBoxKeys` - needed by [cmdMemberApprove] to seal
+ * the current epoch key to the target's actual per-user box key (read off their own join entry). */
+private fun userBoxKeyFor(store: LocalStore, roomIdBytes: ByteArray, target: ByteArray): ByteArray? {
+    for (row in store.logEntriesFrom(roomIdBytes, 0L)) {
+        val entry = LogEntry.decode(row.entry_cbor) ?: continue
+        if (entry.author.contentEquals(target)) return entry.cert.userBox
+    }
+    return null
+}
+
+private suspend fun cmdMemberApprove(crypto: Crypto, dataDir: File, relay: String, roomRef: String, userKeyB64: String) {
+    val (sync, identity, store) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    sync.rehydrateEpochKeys(roomIdBytes)
+    val target = unb64(userKeyB64)
+    val epoch = membershipHistory(crypto, store, roomIdBytes).current.epoch
+    val epochKey = sync.epochKeyFor(roomIdBytes, epoch) ?: run { System.err.println("epoch key not available locally"); exitProcess(1) }
+    val targetUserBox = userBoxKeyFor(store, roomIdBytes, target)
+        ?: run { System.err.println("target's userBoxKey not found - have they sent a join entry yet?"); exitProcess(1) }
+    val sealed = EpochKeys.seal(crypto, targetUserBox, roomIdBytes, epoch, epochKey)
+    val outcome = sync.appendLogEntry(roomIdBytes) { index, prev ->
+        LogEntry.sign(
+            crypto, identity.device.secretKey, roomIdBytes, index, prev, identity.userIdentity.userKey, identity.cert,
+            EntryType.APPROVE, CborValue.Map(mapOf(0L to CborValue.Bytes(target), 1L to CborValue.Bytes(sealed))), System.currentTimeMillis() / 1000,
+        )
+    }
+    exitOnFailure(outcome)
+    println("approved $userKeyB64 in $roomRef")
+}
+
+private suspend fun cmdMemberSetRole(crypto: Crypto, dataDir: File, relay: String, roomRef: String, userKeyB64: String, role: String) {
+    val (sync, identity, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    val target = unb64(userKeyB64)
+    val outcome = sync.appendLogEntry(roomIdBytes) { index, prev ->
+        LogEntry.sign(
+            crypto, identity.device.secretKey, roomIdBytes, index, prev, identity.userIdentity.userKey, identity.cert,
+            EntryType.SET_ROLE, CborValue.Map(mapOf(0L to CborValue.Bytes(target), 1L to CborValue.Text(role))), System.currentTimeMillis() / 1000,
+        )
+    }
+    exitOnFailure(outcome)
+    println("set $userKeyB64 to $role in $roomRef")
+}
+
+private suspend fun cmdMemberTransfer(crypto: Crypto, dataDir: File, relay: String, roomRef: String, userKeyB64: String) {
+    val (sync, identity, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    val target = unb64(userKeyB64)
+    val outcome = sync.appendLogEntry(roomIdBytes) { index, prev ->
+        LogEntry.sign(
+            crypto, identity.device.secretKey, roomIdBytes, index, prev, identity.userIdentity.userKey, identity.cert,
+            EntryType.TRANSFER_OWNER, CborValue.Map(mapOf(0L to CborValue.Bytes(target))), System.currentTimeMillis() / 1000,
+        )
+    }
+    exitOnFailure(outcome)
+    println("transferred ownership of $roomRef to $userKeyB64")
+}
+
+private suspend fun cmdMemberList(crypto: Crypto, dataDir: File, relay: String, roomRef: String) {
+    val (sync, _, store) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    val history = membershipHistory(crypto, store, roomIdBytes)
+    for (member in history.current.members()) {
+        println("${b64(member.user)}  ${member.role}")
+    }
 }
