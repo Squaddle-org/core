@@ -10,6 +10,13 @@ jobs:
     # Requires a human approval before this job starts (Settings -> Environments -> release,
     # configured with a required reviewer) - the one human gate before anything actually publishes.
     environment: release
+    # Publishing to the GitHubPackages target (build.gradle.kts) needs packages:write - the
+    # top-level `permissions: contents: read` alone leaves the token unable to push there at all
+    # (confirmed directly: the actual v0.1.0 run failed at `./gradlew publish` with this exact gap
+    # before this fix landed).
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
