@@ -64,6 +64,7 @@ fun main(rawArgs: Array<String>) {
             "member demote" -> cmdMemberSetRole(crypto, dataDir, requireRelay(relay), positional[0], positional[1], "member")
             "member transfer" -> cmdMemberTransfer(crypto, dataDir, requireRelay(relay), positional[0], positional[1])
             "member list" -> cmdMemberList(crypto, dataDir, requireRelay(relay), positional[0])
+            "profile set" -> cmdProfileSet(crypto, dataDir, requireRelay(relay), positional[0], positional[1], flags["emoji"])
             else -> printUsageAndExit()
         }
     }
@@ -113,6 +114,7 @@ private fun printUsageAndExit(): Nothing {
           member demote -relay <host> <roomRef> <userKeyB64>    (-> member)
           member transfer -relay <host> <roomRef> <userKeyB64>  (owner only, target must be admin)
           member list -relay <host> <roomRef>
+          profile set -relay <host> <roomRef> <displayName> [-emoji <text>]
         """.trimIndent(),
     )
     exitProcess(2)
@@ -494,6 +496,16 @@ private suspend fun cmdMemberTransfer(crypto: Crypto, dataDir: File, relay: Stri
     }
     exitOnFailure(outcome)
     println("transferred ownership of $roomRef to $userKeyB64")
+}
+
+private suspend fun cmdProfileSet(crypto: Crypto, dataDir: File, relay: String, roomRef: String, displayName: String, emoji: String?) {
+    val (sync, _, _) = newSyncClient(crypto, dataDir, relay)
+    val (roomIdBytes, _, _) = loadRoomMeta(dataDir, roomRef)
+    sync.pull(roomIdBytes)
+    sync.rehydrateEpochKeys(roomIdBytes)
+    check(sync.enqueueOp(roomIdBytes, OpBody.ProfileSet(displayName, emoji))) { "no epoch key available - pull first" }
+    exitOnFailure(sync.push(roomIdBytes))
+    println("profile set: $displayName${emoji?.let { " $it" } ?: ""}")
 }
 
 private suspend fun cmdMemberList(crypto: Crypto, dataDir: File, relay: String, roomRef: String) {
