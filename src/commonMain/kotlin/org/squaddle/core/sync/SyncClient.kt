@@ -824,6 +824,20 @@ public class SyncClient(
         }
     }
 
+    /** The approval-required counterpart of [joinViaLink] - §3.5: "For approval invites, no
+     * envelope exists", so there's no secret to fetch/decrypt and no epoch key to learn yet (a
+     * `PENDING` member holds no content-plane key at all, §3.3); this is just [joinViaLink]'s own
+     * post-envelope steps (pull the log, then author+push the `join` entry) on their own. The
+     * joiner shows as `pending` (§3.3) until an owner/admin's [approve] lands. */
+    public suspend fun joinPendingApproval(room: ByteArray, inviteId: ByteArray): PushOutcome {
+        val pullOutcome = pullLog(room)
+        if (pullOutcome is SyncOutcome.Error) return PushOutcome.Error(pullOutcome.status, pullOutcome.code, pullOutcome.message)
+        val body = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
+        return appendLogEntry(room) { index, prev ->
+            LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.JOIN, body, nowUnixSeconds())
+        }
+    }
+
     /**
      * PROTOCOL.md §6: opens `/ws`, subscribes to [rooms], and calls [pull] on every push - a
      * fresh [pull] naturally covers both log and ops regardless of which one [WsEvent.k] names

@@ -71,10 +71,10 @@ public class CommentJs(public val id: ByteArray, public val ideaId: ByteArray, p
 @JsExport
 public class MemberJs(public val userKey: ByteArray, public val role: String)
 
-/** [start]/[end] are millisecond epoch timestamps (JS `Date`-friendly, unlike core's own `Long`
- * seconds-or-millis-agnostic field - callers construct a `Date` directly from these). [myRsvp] is
- * `"yes"`/`"no"`/`"maybe"`, or `null` if the caller hasn't RSVPed. [canCancel] mirrors android's
- * own `RoomViewModel.eventSummary`: admin/owner, or this event's own creator. */
+/** [start]/[end] are Unix **seconds** (same unit as android's own `EventSummary`/`CalendarExport.kt`
+ * - `Instant.ofEpochSecond`, not millis; multiply by 1000 before constructing a JS `Date`).
+ * [myRsvp] is `"yes"`/`"no"`/`"maybe"`, or `null` if the caller hasn't RSVPed. [canCancel] mirrors
+ * android's own `RoomViewModel.eventSummary`: admin/owner, or this event's own creator. */
 @JsExport
 public class EventJs(
     public val id: ByteArray,
@@ -198,6 +198,12 @@ public class RelaySession internal constructor(
      * invite flow, so that gap is left explicit here rather than duplicated or faked. */
     public suspend fun joinViaLink(roomId: ByteArray, inviteId: ByteArray, inviteSecret: ByteArray): PushResult =
         sync.joinViaLink(roomId, inviteId, inviteSecret).toJs()
+
+    /** The approval-required counterpart of [joinViaLink] - see [SyncClient.joinPendingApproval]'s
+     * own doc comment. No room name to preview beforehand (no envelope exists for these invites
+     * at all); the joiner shows as `"pending"` (see [MemberJs.role]) until approved. */
+    public suspend fun joinPendingApproval(roomId: ByteArray, inviteId: ByteArray): PushResult =
+        sync.joinPendingApproval(roomId, inviteId).toJs()
 
     /** `null` if there's no secret to decrypt with (approval-required invite - §3.5, no
      * envelope exists), the envelope fetch failed, or it didn't decrypt. Read-only: safe to
