@@ -58,8 +58,15 @@ public class LibsodiumCrypto private constructor() : Crypto {
     override fun sealBox(recipientPk: ByteArray, plaintext: ByteArray): ByteArray =
         Box.seal(plaintext.toUByteArray(), recipientPk.toUByteArray()).toByteArray()
 
-    override fun openSealedBox(recipient: KeyPair, ciphertext: ByteArray): ByteArray? =
-        try {
+    override fun openSealedBox(recipient: KeyPair, ciphertext: ByteArray): ByteArray? {
+        // A ciphertext shorter than crypto_box_SEALBYTES (48 bytes: ephemeral pubkey + Poly1305
+        // MAC) makes the underlying implementation compute a negative plaintext length before it
+        // ever gets to validate the MAC, throwing a platform-specific "negative array size" error
+        // instead of returning null (confirmed directly - DeviceLinkTest's malformed-blob case) -
+        // that exception type isn't part of Kotlin's common stdlib, so this checks the only thing
+        // that actually needs checking (length) up front rather than trying to catch it per platform.
+        if (ciphertext.size < SEALED_BOX_OVERHEAD) return null
+        return try {
             Box.sealOpen(ciphertext.toUByteArray(), recipient.publicKey.toUByteArray(), recipient.secretKey.toUByteArray())
                 .toByteArray()
         } catch (e: BoxCorruptedOrTamperedDataException) {
@@ -67,6 +74,7 @@ public class LibsodiumCrypto private constructor() : Crypto {
         } catch (e: IndexOutOfBoundsException) {
             null
         }
+    }
 
     override fun aeadEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, ad: ByteArray): ByteArray =
         AuthenticatedEncryptionWithAssociatedData.xChaCha20Poly1305IetfEncrypt(
@@ -100,6 +108,11 @@ public class LibsodiumCrypto private constructor() : Crypto {
         ).toByteArray()
 
     public companion object {
+        /** `crypto_box_SEALBYTES` - libsodium's own stable constant, `crypto_box_PUBLICKEYBYTES`
+         * (32, the sender's ephemeral X25519 key) + `crypto_box_MACBYTES` (16, Poly1305) - the
+         * fixed overhead `crypto_box_seal` adds over the plaintext, same on every platform. */
+        private const val SEALED_BOX_OVERHEAD = 48
+
         /** Initializes libsodium (loads the native/WASM module) and returns a ready-to-use facade. */
         public suspend fun create(): LibsodiumCrypto {
             if (!LibsodiumInitializer.isInitialized()) {
