@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "group:allNonMajor",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "enabledManagers": ["github-actions", "gradle"],
+  "pinDigests": true
+}
