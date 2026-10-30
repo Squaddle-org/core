@@ -1,0 +1,30 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Requires a human approval before this job starts (Settings -> Environments -> release,
+    # configured with a required reviewer) - the one human gate before anything actually reaches
+    # Maven Central, since mavenPublishing's own automaticRelease = true (build.gradle.kts) skips
+    # the separate "click Publish on the Central Portal website" step that would otherwise be it.
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      - uses: gradle/actions/setup-gradle@7296c772c13d12d9871528814b51fb2143c138ef # v6.4.1
+      - run: ./gradlew publishToMavenCentral
+        env:
+          # vanniktech/gradle-maven-publish-plugin's own documented env var names - a Central
+          # Portal user token (not your Central Portal login password - generated on the Central
+          # Portal website itself) and an in-memory-armored GPG key, both read directly from
+          # these repo-environment secrets, never written to disk.
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}

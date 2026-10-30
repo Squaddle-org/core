@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.sqldelight)
-    `maven-publish`
+    alias(libs.plugins.maven.publish)
 }
 
 group = "org.squaddle"
@@ -136,6 +136,42 @@ publishing {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
             }
+        }
+    }
+}
+
+// Maven Central (Central Portal) publishing, on top of the GitHubPackages target above - android
+// resolves org.squaddle:core from here with no token at all (release.yml's own verification
+// step). automaticRelease = true: the one GitHub-side protected `release` environment approval
+// (release.yml) is the human gate - a second manual "click Publish" on the Central Portal website
+// after that would just be a redundant, easy-to-forget extra step.
+mavenPublishing {
+    publishToMavenCentral(automaticRelease = true)
+    signAllPublications()
+
+    pom {
+        name.set("Squaddle Core")
+        description.set("Kotlin Multiplatform implementation of the Squaddle protocol - crypto, sync client, and local store, shared across the Android app, CLI, and web client.")
+        inceptionYear.set("2026")
+        url.set("https://github.com/squaddle-org/core")
+        licenses {
+            license {
+                name.set("Apache-2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+            }
+        }
+        developers {
+            developer {
+                id.set("squaddle-org")
+                name.set("The Squaddle Authors")
+                url.set("https://github.com/squaddle-org")
+            }
+        }
+        scm {
+            url.set("https://github.com/squaddle-org/core")
+            connection.set("scm:git:git://github.com/squaddle-org/core.git")
+            developerConnection.set("scm:git:ssh://git@github.com/squaddle-org/core.git")
         }
     }
 }
