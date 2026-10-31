@@ -334,15 +334,28 @@ class SyncClientTest {
         val joinerDevice = crypto.signSeedKeypair(crypto.randomBytes(32))
         val joinerCert = DeviceCert.sign(crypto, joiner.signing.secretKey, joiner.userKey, joiner.userBoxKey, joinerDevice.publicKey, "New Phone", 1L)
 
+        // A pre-existing op the room already had before this joiner arrived - reproduces the
+        // live bug this test now guards against: a fresh joiner's room looked silently empty
+        // because joinViaLink pulled the log (so membership synced fine) but never backfilled
+        // ops, leaving content like this invisible until some unrelated trigger happened to
+        // call pull()/pullOps() later.
+        val preExistingOp = org.squaddle.core.ops.OpEnvelope.create(
+            crypto, ownerDevice.secretKey, epochKey, room, 0L, owner.userKey, ownerDevice.publicKey, 1L, 1L,
+            OpBody.IdeaCreate(crypto.randomBytes(16), "Board game night", null, emptyList()),
+        )
+
         var postLogCalls = 0
+        var opsRequests = 0
         val mockEngine = MockEngine { request ->
             when {
                 request.method == HttpMethod.Get && request.url.encodedPath.endsWith("/envelope") ->
                     respond(envelope, HttpStatusCode.OK)
                 request.method == HttpMethod.Get && request.url.encodedPath.endsWith("/log") ->
                     respond(logResponseBytes(listOf(CanonicalCborCodec.encode(genesis.toFullCbor()) to 100L)), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/cbor"))
-                request.method == HttpMethod.Get && request.url.encodedPath.endsWith("/ops") ->
-                    respond(opsResponseBytes(emptyList(), 0L), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/cbor"))
+                request.method == HttpMethod.Get && request.url.encodedPath.endsWith("/ops") -> {
+                    opsRequests++
+                    respond(opsResponseBytes(listOf(1L to CanonicalCborCodec.encode(preExistingOp.toFullCbor())), 1L), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/cbor"))
+                }
                 request.method == HttpMethod.Post && request.url.encodedPath.endsWith("/log") -> {
                     postLogCalls++
                     respond("""{"index":1,"rts":200}""".encodeToByteArray(), HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
@@ -358,6 +371,9 @@ class SyncClientTest {
         assertEquals(PushOutcome.Ok, outcome)
         assertEquals(1, postLogCalls)
         assertEquals(epochKey.toList(), sync.epochKeyFor(room, 0L)?.toList())
+        assertEquals(1, opsRequests)
+        assertEquals(1, store.opsAfter(room, 0L).size)
+        assertEquals(1L, store.cursorFor(room)!!.last_ops_cursor)
     }
 
     @Test

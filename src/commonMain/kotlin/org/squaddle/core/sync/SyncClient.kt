@@ -800,9 +800,16 @@ public class SyncClient(
      * the room's current log only (a brand-new joiner has no local history yet and must learn
      * the real chain head before it can sign a `join` entry against the correct index/prev -
      * [pullLog], not the full [pull]: `getOps` is members-only and this joiner isn't one yet),
-     * then authors+pushes the `join` entry. [inviteSecret] is the bytes from the invite link's
-     * URL fragment - never logged, never sent anywhere itself (only used locally to derive
-     * `inviteKey` and decrypt). */
+     * then authors+pushes the `join` entry, then best-effort backfills every op the room already
+     * had (the join entry just made this device a member, so [pullOps] - previously skipped for
+     * the same members-only reason as above - now succeeds). Without this, a fresh joiner has a
+     * member row and an empty room: the next ops it sees are only whatever gets pushed *after* it
+     * joined, via some other, unrelated trigger (opening the room screen, a websocket push, the
+     * periodic sync worker) - found via a live report of exactly that (joiner's room looked
+     * silently empty, and reopening it didn't help, because none of those triggers had fired
+     * yet). A failed backfill here doesn't fail the join itself - [pull] on the next real trigger
+     * covers it. [inviteSecret] is the bytes from the invite link's URL fragment - never logged,
+     * never sent anywhere itself (only used locally to derive `inviteKey` and decrypt). */
     public suspend fun joinViaLink(room: ByteArray, inviteId: ByteArray, inviteSecret: ByteArray): PushOutcome {
         val resp = httpClient.request("$httpScheme://$relayHost${path("/invites/${b64Url(room)}/${b64Url(inviteId)}/envelope")}") {
             this.method = HttpMethod.Get
@@ -819,16 +826,22 @@ public class SyncClient(
         if (pullOutcome is SyncOutcome.Error) return PushOutcome.Error(pullOutcome.status, pullOutcome.code, pullOutcome.message)
 
         val body = CborValue.Map(mapOf(0L to CborValue.Bytes(inviteId)))
-        return appendLogEntry(room) { index, prev ->
+        val joinOutcome = appendLogEntry(room) { index, prev ->
             LogEntry.sign(crypto, device.secretKey, room, index, prev, userIdentity.userKey, deviceCert, EntryType.JOIN, body, nowUnixSeconds())
         }
+        if (joinOutcome is PushOutcome.Ok) pullOps(room) // best-effort - see doc comment above
+        return joinOutcome
     }
 
     /** The approval-required counterpart of [joinViaLink] - §3.5: "For approval invites, no
      * envelope exists", so there's no secret to fetch/decrypt and no epoch key to learn yet (a
      * `PENDING` member holds no content-plane key at all, §3.3); this is just [joinViaLink]'s own
-     * post-envelope steps (pull the log, then author+push the `join` entry) on their own. The
-     * joiner shows as `pending` (§3.3) until an owner/admin's [approve] lands. */
+     * post-envelope steps (pull the log, then author+push the `join` entry) on their own. No
+     * [pullOps] call here unlike [joinViaLink] - §3.3 "pending has no read access", relay's own
+     * `getOps` enforces member/admin/owner only (`relay/internal/api/ops.go`), so it would just
+     * 403 every time. The joiner shows as `pending` until an owner/admin's [approve] lands; that
+     * caller is responsible for its own [pullOps]/[pull] once this device actually becomes a
+     * member. */
     public suspend fun joinPendingApproval(room: ByteArray, inviteId: ByteArray): PushOutcome {
         val pullOutcome = pullLog(room)
         if (pullOutcome is SyncOutcome.Error) return PushOutcome.Error(pullOutcome.status, pullOutcome.code, pullOutcome.message)
