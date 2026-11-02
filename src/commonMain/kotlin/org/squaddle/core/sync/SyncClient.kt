@@ -534,6 +534,15 @@ public class SyncClient(
     public suspend fun setProfile(room: ByteArray, displayName: String, emoji: String?): PushOutcome =
         enqueueAndPush(room, OpBody.ProfileSet(displayName, emoji))
 
+    /** PROTOCOL.md §4.2/ADR-0014: admin or owner only - unlike [setProfile], no "own" concept at
+     * all, so the caller's own role is what [RoomState.fold] checks, not authorship. A non-admin
+     * caller's op is still durably enqueued+pushed here (same as every other [enqueueAndPush] -
+     * rejecting client-side before enqueueing isn't this layer's job) but every *other* client's
+     * fold will simply ignore it; callers should gate the UI action itself on role already known
+     * locally, same as every other admin-only action already does. */
+    public suspend fun setRoomName(room: ByteArray, name: String): PushOutcome =
+        enqueueAndPush(room, OpBody.RoomSet(name))
+
     /** Collects each current member's `userBoxKey` from the DeviceCert embedded in their most
      * recent authored log entry (every cert carries the author's actual per-user box key, not a
      * per-device one, per §2.1/§2.2). */

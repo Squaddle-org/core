@@ -177,6 +177,9 @@ public sealed interface OpBody {
     public data class EventCancel(val id: ByteArray) : OpBody
     public data class RsvpSet(val eventId: ByteArray, val value: String) : OpBody
     public data class ProfileSet(val displayName: String, val emoji: String?) : OpBody
+    /** Unlike [ProfileSet], not author-keyed at all - PROTOCOL.md §4.2/ADR-0014: a room's name is
+     * shared room state, not personal data, so authorization is a pure admin-or-owner role check. */
+    public data class RoomSet(val name: String) : OpBody
     /** Forward compatibility: unknown types are kept but ignored by the materializer. */
     public data class Unknown(val type: String) : OpBody
 }

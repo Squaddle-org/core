@@ -293,6 +293,23 @@ public class RelaySession internal constructor(
         return history.current.roleOf(userIdentity.userKey)?.name?.lowercase()
     }
 
+    /** The materialized, synced room name (PROTOCOL.md §4.2/ADR-0014) - `null` until some
+     * admin/owner has ever authored a `room.set` for this room (e.g. a room created before this
+     * op existed). Pure local replay, same posture as [myRole] - call [pull] first for fresh data. */
+    public suspend fun roomName(roomId: ByteArray): String? {
+        val state = materializeRoomState(crypto, sync, store, roomId)
+        return state.roomName?.name
+    }
+
+    /** Whether this caller is currently allowed to rename [roomId] - admin/owner only, no
+     * room-setting escape hatch (unlike [canCreateEvent]'s `membersCanCreateEvents`) - mirrors
+     * android's own `isAdminOrOwner` UI-gating computation. */
+    public suspend fun canRenameRoom(roomId: ByteArray): Boolean {
+        val (history, _) = replayMembershipHistory(crypto, store, roomId)
+        val role = history.current.roleOf(userIdentity.userKey)
+        return role == org.squaddle.core.membership.Role.ADMIN || role == org.squaddle.core.membership.Role.OWNER
+    }
+
     /** Whether this caller is currently allowed to create an event in [roomId] - admin/owner
      * always can; a plain member can only if the room's `membersCanCreateEvents` setting (§3.3
      * row 11 field 1, default on) allows it at the room's current epoch. Mirrors android's
@@ -349,6 +366,9 @@ public class RelaySession internal constructor(
 
     public suspend fun setProfile(roomId: ByteArray, displayName: String, emoji: String?): PushResult =
         sync.setProfile(roomId, displayName, emoji).toJs()
+
+    public suspend fun setRoomName(roomId: ByteArray, name: String): PushResult =
+        sync.setRoomName(roomId, name).toJs()
 
     public suspend fun kick(roomId: ByteArray, target: ByteArray): PushResult = sync.kick(roomId, target).toJs()
 

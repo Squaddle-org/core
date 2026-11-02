@@ -285,6 +285,66 @@ class RoomStateTest {
     }
 
     @Test
+    fun roomSetByOwnerIsAuthorized() = runTest {
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        val env = room.op(owner, OpBody.RoomSet("Camping crew"))
+        val body = open(crypto, env, room.epochKey, listOf(owner, member))!!
+
+        val state = RoomState.fold(listOf(env to body), room.history())
+        assertEquals("Camping crew", state.roomName?.name)
+    }
+
+    @Test
+    fun roomSetByAdminIsAuthorized() = runTest {
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        val admin = actor(crypto, "Admin")
+        val inviteId2 = crypto.randomBytes(16)
+        room.apply(owner, EntryType.INVITE_CREATE, inviteCreateBody(inviteId2))
+        room.apply(admin, EntryType.JOIN, joinBody(inviteId2))
+        room.apply(owner, EntryType.SET_ROLE, setRoleBody(admin.identity.userKey, "admin"))
+
+        val env = room.op(admin, OpBody.RoomSet("Admin-renamed"))
+        val certs = listOf(owner, member, admin)
+        val state = RoomState.fold(listOf(env to open(crypto, env, room.epochKey, certs)!!), room.history())
+        assertEquals("Admin-renamed", state.roomName?.name)
+    }
+
+    @Test
+    fun roomSetByPlainMemberIsRejected() = runTest {
+        // §4.2/ADR-0014: unlike idea.set/comment.delete/event.set, there's no "author" concept at
+        // all for room.set to fall back to - a plain member's attempt is just unauthorized, full stop.
+        val crypto = crypto()
+        val (room, _, member) = setUpOwnerAndMember(crypto)
+        val env = room.op(member, OpBody.RoomSet("Hijacked name"))
+        val body = open(crypto, env, room.epochKey, listOf(member))!!
+
+        val state = RoomState.fold(listOf(env to body), room.history())
+        assertNull(state.roomName)
+    }
+
+    @Test
+    fun roomSetLaterStampWinsRegardlessOfArrivalOrder() = runTest {
+        val crypto = crypto()
+        val (room, owner, member) = setUpOwnerAndMember(crypto)
+        val admin = actor(crypto, "Admin")
+        val inviteId2 = crypto.randomBytes(16)
+        room.apply(owner, EntryType.INVITE_CREATE, inviteCreateBody(inviteId2))
+        room.apply(admin, EntryType.JOIN, joinBody(inviteId2))
+        room.apply(owner, EntryType.SET_ROLE, setRoleBody(admin.identity.userKey, "admin"))
+
+        val earlier = room.op(owner, OpBody.RoomSet("First name")) // lower lamport
+        val later = room.op(admin, OpBody.RoomSet("Second name")) // higher lamport
+        val certs = listOf(owner, member, admin)
+        // Fed in reverse arrival order - fold must still converge on the higher-stamped write.
+        val ops = listOf(later, earlier).map { it to open(crypto, it, room.epochKey, certs)!! }
+
+        val state = RoomState.fold(ops, room.history())
+        assertEquals("Second name", state.roomName?.name)
+    }
+
+    @Test
     fun unknownOpTypeIsIgnoredNotRejected() = runTest {
         val crypto = crypto()
         val (room, owner, member) = setUpOwnerAndMember(crypto)

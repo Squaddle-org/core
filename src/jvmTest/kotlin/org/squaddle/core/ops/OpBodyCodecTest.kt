@@ -97,6 +97,12 @@ class OpBodyCodecTest {
     }
 
     @Test
+    fun roomSetRoundTrips() {
+        val body = OpBody.RoomSet("Camping crew")
+        assertEquals(body, decodeOpBody(body.encode()))
+    }
+
+    @Test
     fun unknownTypeDecodesToUnknownNotNull() {
         val encoded = OpBody.Unknown("future.type").encode()
         // Unknown's own encode() writes an empty payload (nothing to round-trip semantically -

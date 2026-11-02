@@ -25,6 +25,7 @@ private fun OpBody.typeName(): String = when (this) {
     is OpBody.EventCancel -> "event.cancel"
     is OpBody.RsvpSet -> "rsvp.set"
     is OpBody.ProfileSet -> "profile.set"
+    is OpBody.RoomSet -> "room.set"
     is OpBody.Unknown -> type
 }
 
@@ -105,6 +106,7 @@ private fun OpBody.payloadCbor(): CborValue.Map {
             m[0L] = CborValue.Text(displayName)
             emoji?.let { m[1L] = CborValue.Text(it) }
         }
+        is OpBody.RoomSet -> m[0L] = CborValue.Text(name)
         is OpBody.Unknown -> {}
     }
     return CborValue.Map(m)
@@ -174,6 +176,7 @@ public fun decodeOpBody(bytes: ByteArray): OpBody? {
                 displayName = (payload.getValue(0L) as CborValue.Text).value,
                 emoji = (payload[1L] as? CborValue.Text)?.value,
             )
+            "room.set" -> OpBody.RoomSet(name = (payload.getValue(0L) as CborValue.Text).value)
             else -> OpBody.Unknown(type)
         }
     } catch (e: NoSuchElementException) {

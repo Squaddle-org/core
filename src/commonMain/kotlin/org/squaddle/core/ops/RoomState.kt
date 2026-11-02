@@ -133,6 +133,9 @@ public data class Vote(val value: Int, val stamp: LwwStamp)
 public data class Rsvp(val value: String, val stamp: LwwStamp)
 public data class Profile(val displayName: String, val emoji: String?, val stamp: LwwStamp)
 
+/** PROTOCOL.md §4.2/ADR-0014: unlike [Profile], not author-keyed - a single room-wide value. */
+public data class RoomName(val name: String, val stamp: LwwStamp)
+
 /**
  * The materialized content-plane view (PROTOCOL.md §4.2), folded from verified+decrypted ops.
  * Immutable; [fold] is a pure function over a collection with no order dependence - every field
@@ -146,6 +149,7 @@ public data class RoomState(
     val votes: Map<String, Vote> = emptyMap(), // key: ideaIdHex + authorHex
     val rsvps: Map<String, Rsvp> = emptyMap(), // key: eventIdHex + authorHex
     val profiles: Map<String, Profile> = emptyMap(), // key: authorHex
+    val roomName: RoomName? = null,
 ) {
     public companion object {
         private val NEVER = LwwStamp(Long.MIN_VALUE, ByteArray(0))
@@ -169,6 +173,7 @@ public data class RoomState(
                     is OpBody.EventCancel -> state.withEventCancel(env, body, role, stamp)
                     is OpBody.RsvpSet -> state.withRsvp(env, body, stamp)
                     is OpBody.ProfileSet -> state.withProfile(env, body, stamp)
+                    is OpBody.RoomSet -> state.withRoomName(body, role, stamp)
                     is OpBody.Unknown -> state // §4.2: "Unknown types MUST be ignored"
                 }
             }
@@ -271,6 +276,16 @@ public data class RoomState(
         val existing = profiles[key]
         if (existing != null && existing.stamp > stamp) return this
         return copy(profiles = profiles + (key to Profile(body.displayName, body.emoji, stamp)))
+    }
+
+    /** "admin or owner" (§4.2/ADR-0014) - unlike every other role-gated op above, there's no
+     * author-ownership check to combine this with: a room's name has no author, just a current
+     * admin/owner allowed to set it, so this is a pure role check rather than an author-match. */
+    private fun withRoomName(body: OpBody.RoomSet, role: Role?, stamp: LwwStamp): RoomState {
+        if (!role.isAdminOrOwner()) return this
+        val existing = roomName
+        if (existing != null && existing.stamp > stamp) return this
+        return copy(roomName = RoomName(body.name, stamp))
     }
 
     /** [votes]' keys are `ideaIdHex + authorHex` with no reverse index back to either part, so
