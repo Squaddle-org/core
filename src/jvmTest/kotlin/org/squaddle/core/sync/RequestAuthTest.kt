@@ -27,6 +27,23 @@ class RequestAuthTest {
     }
 
     @Test
+    fun queryParamsVerifiesAgainstTheSameSigningInputAsHeaderValue() = runTest {
+        // ADR-0015: same four fields, same signing input, just formatted as a query string
+        // instead of a header - this is the format-equivalence that matters, not a new signature
+        // scheme, so it should verify against RequestAuth.signingInput exactly like headerValue
+        // does.
+        val crypto = crypto()
+        val device = crypto.signSeedKeypair(crypto.randomBytes(32))
+        val nonce = crypto.randomBytes(16)
+        val query = RequestAuth.queryParams(crypto, device.secretKey, device.publicKey, "GET", "/v1/ws", 1_700_000_000L, nonce, ByteArray(0))
+
+        val sigB64 = query.substringAfter("sig=")
+        val decoded = kotlin.io.encoding.Base64.UrlSafe.withPadding(kotlin.io.encoding.Base64.PaddingOption.ABSENT).decode(sigB64)
+        val signingInput = RequestAuth.signingInput(crypto, "GET", "/v1/ws", 1_700_000_000L, nonce, ByteArray(0))
+        assertTrue(crypto.verify(device.publicKey, signingInput, decoded))
+    }
+
+    @Test
     fun differentBodyProducesDifferentSigningInput() = runTest {
         val crypto = crypto()
         val nonce = crypto.randomBytes(16)

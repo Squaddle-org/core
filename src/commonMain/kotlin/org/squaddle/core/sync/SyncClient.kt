@@ -877,9 +877,13 @@ public class SyncClient(
         // a pull.
         val roomRefs = rooms.associateBy { Base32.encode(it).lowercase() }
         val ts = nowUnixSeconds()
-        val authHeader = RequestAuth.headerValue(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, crypto.randomBytes(16), ByteArray(0))
+        // Query parameters, not a header (ADR-0015, RequestAuth.queryParams's own doc comment) -
+        // a browser's native WebSocket API can't set a custom Authorization header on this upgrade
+        // request at all, found live (every real-browser GET /v1/ws got 401). Used uniformly on
+        // every platform, not just the JS target, so this call needs no platform branching.
+        val authQuery = RequestAuth.queryParams(crypto, device.secretKey, device.publicKey, "GET", path("/ws"), ts, crypto.randomBytes(16), ByteArray(0))
 
-        httpClient.webSocket("$wsScheme://$relayHost${path("/ws")}", request = { header("Authorization", authHeader) }) {
+        httpClient.webSocket("$wsScheme://$relayHost${path("/ws")}?$authQuery") {
             send(Frame.Text(Json.encodeToString(WsSubscribe.serializer(), WsSubscribe(roomRefs.keys.toList()))))
             for (frame in incoming) {
                 if (frame !is Frame.Text) continue

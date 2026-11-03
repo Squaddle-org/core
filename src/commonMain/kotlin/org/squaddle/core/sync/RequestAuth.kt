@@ -53,4 +53,32 @@ public object RequestAuth {
         val sig = crypto.sign(deviceSecretKey, signingInput(crypto, method, pathAndQuery, tsUnix, nonce, body))
         return "SQDL1 device=${b64(devicePublicKey)}, ts=$tsUnix, nonce=${b64(nonce)}, sig=${b64(sig)}"
     }
+
+    /**
+     * Same four fields as [headerValue] (device/ts/nonce/sig), formatted as a URL query string
+     * instead of an `Authorization` header - `GET /ws`'s only consumer (ADR-0015). A browser's
+     * native `WebSocket` constructor has no way to set a custom header on the upgrade request at
+     * all (unlike every other call here, which goes through `fetch`/XHR and can), so this is the
+     * one call every platform uses uniformly, not just the JS target: there's no other legitimate
+     * query usage on `/ws` to collide with, so no platform-specific branching is needed.
+     *
+     * [pathAndQuery] is still the *bare* path this signs over (`/v1/ws`, no query) - the query
+     * string this function returns is never itself part of the signing input, same as the header's
+     * own transport is already out-of-band from it today (relay/internal/api/auth.go's
+     * `allowQueryAuth`: the server always verifies this route against `r.URL.Path`, never
+     * `r.URL.RequestURI()`, regardless of which transport carried these four fields).
+     */
+    public fun queryParams(
+        crypto: Crypto,
+        deviceSecretKey: ByteArray,
+        devicePublicKey: ByteArray,
+        method: String,
+        pathAndQuery: String,
+        tsUnix: Long,
+        nonce: ByteArray,
+        body: ByteArray,
+    ): String {
+        val sig = crypto.sign(deviceSecretKey, signingInput(crypto, method, pathAndQuery, tsUnix, nonce, body))
+        return "device=${b64(devicePublicKey)}&ts=$tsUnix&nonce=${b64(nonce)}&sig=${b64(sig)}"
+    }
 }
